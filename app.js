@@ -10,7 +10,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.6.0';
+  const VERSION = '1.6.1';
 
   // The page and the code must come from the same release. If an update arrived half-way
   // (e.g. a cached old app.js with a new index.html), throw away the app's cached files once and
@@ -390,7 +390,7 @@
     enqueue(item);
     lastTap = { id: item.id, ts: now, action };
     store.set(KEYS.lastTap, lastTap);
-    if (navigator.vibrate) navigator.vibrate(15);
+    // (the tap itself is felt via the global haptic on every button press)
     showToast();
   }
 
@@ -1782,10 +1782,11 @@
 
   async function onNtfyClick(e) {
     if (e.target.id === 'ntfyCopy') {
-      try { await navigator.clipboard.writeText(ntfy.topic); renderNtfy('topic copied'); } catch (er) { prompt('Copy this topic:', ntfy.topic); }
+      try { await navigator.clipboard.writeText(ntfy.topic); renderNtfy('topic copied'); confirmBtn($('ntfyCopy'), 'Copied ✓'); } catch (er) { prompt('Copy this topic:', ntfy.topic); }
     }
     if (e.target.id === 'ntfyTest') {
-      try { const r = await api({ api: 'notifyTest' }); renderNtfy(r.ok ? 'test sent — check your phone' : r.error); }
+      busyBtn(e.target, 'Sending…');
+      try { const r = await api({ api: 'notifyTest' }); renderNtfy(r.ok ? 'test sent — check your phone' : r.error); if (r.ok) confirmBtn($('ntfyTest'), 'Sent ✓'); }
       catch (er) { renderNtfy('needs signal'); }
     }
   }
@@ -1873,20 +1874,96 @@
     }
   }
 
+  /* ---------------- touch feedback ---------------- */
+
+  const PRESSABLE = 'button, .btn, label.btn, a.btn, summary, ul.list li.click, .cell, .navbtn, .chips button, .seg button, .tabs button, [data-open], [data-share]';
+
+  /** A light tap felt in the hand. Android: vibrate. iPhone (iOS 18+): Safari gives a haptic tick when
+   *  a "switch" checkbox is toggled, so a hidden one is toggled. Older iPhones simply get no buzz. */
+  const hapticSwitch = (() => {
+    try {
+      const l = document.createElement('label');
+      l.setAttribute('aria-hidden', 'true'); l.dataset.haptic = '1';
+      l.style.cssText = 'position:fixed;left:-200px;top:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none';
+      const i = document.createElement('input');
+      i.type = 'checkbox'; i.setAttribute('switch', ''); i.tabIndex = -1;
+      l.appendChild(i); document.body.appendChild(l);
+      return l;
+    } catch (e) { return null; }
+  })();
+  function haptic() {
+    try {
+      if (navigator.vibrate) { navigator.vibrate(10); return; }
+      // Don't steal focus from a field you're typing in (that would close the keyboard).
+      const ae = document.activeElement;
+      if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && ae.type !== 'checkbox') return;
+      if (hapticSwitch) hapticSwitch.click();
+    } catch (e) { /* no haptics on this device */ }
+  }
+
+  /** Shows a short confirmation on a button ("Copied ✓"), then puts it back. */
+  function confirmBtn(btn, text, ms) {
+    if (!btn) return;
+    if (btn.dataset.orig === undefined) btn.dataset.orig = btn.innerHTML;
+    clearTimeout(btn._done);
+    btn.classList.remove('busy');
+    btn.classList.add('done');
+    btn.textContent = text || 'Done ✓';
+    btn._done = setTimeout(() => { btn.classList.remove('done'); btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }, ms || 1600);
+  }
+  function busyBtn(btn, text) {
+    if (!btn) return;
+    if (btn.dataset.orig === undefined) btn.dataset.orig = btn.innerHTML;
+    btn.classList.add('busy');
+    btn.textContent = text || 'Working…';
+  }
+  function restoreBtn(btn) {
+    if (!btn || btn.dataset.orig === undefined) return;
+    btn.classList.remove('busy', 'done'); btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig;
+  }
+
+  function wireFeedback() {
+    let pressedEl = null, pressedAt = 0;
+    const release = () => {
+      const el = pressedEl; if (!el) return;
+      pressedEl = null;
+      // keep the pressed look on screen for at least ~110ms, so even a quick tap is visible
+      setTimeout(() => el.classList.remove('pressed'), Math.max(0, 110 - (Date.now() - pressedAt)));
+    };
+    document.addEventListener('pointerdown', e => {
+      const el = e.target.closest(PRESSABLE);
+      if (!el || el.disabled || el.closest('[data-haptic]')) return;
+      pressedEl = el; pressedAt = Date.now();
+      el.classList.add('pressed');
+    }, { passive: true });
+    ['pointerup', 'pointercancel', 'pointerleave', 'scroll'].forEach(t => document.addEventListener(t, release, { passive: true, capture: true }));
+    document.addEventListener('click', e => {
+      if (e.target.closest('[data-haptic]')) return;
+      const el = e.target.closest(PRESSABLE);
+      if (el && !el.disabled) haptic();
+    }, true);
+    document.addEventListener('touchstart', () => {}, { passive: true }); // lets iOS apply :active styles
+  }
+
   /* ---------------- wiring ---------------- */
 
   function wire() {
+    wireFeedback();
     $('toggle').addEventListener('click', onToggle);
     $('toastUndo').addEventListener('click', onUndo);
-    $('noteAdd').addEventListener('click', onNote);
+    $('noteAdd').addEventListener('click', e => { const had = $('noteText').value.trim(); onNote(); if (had) confirmBtn(e.currentTarget, 'Added ✓', 1200); });
     $('noteText').addEventListener('keydown', e => { if (e.key === 'Enter') onNote(); });
     $('mAdd').addEventListener('click', onManual);
     $('syncPill').addEventListener('click', () => sync());
-    $('syncNow').addEventListener('click', () => sync());
+    $('syncNow').addEventListener('click', async e => {
+      const b = e.currentTarget; busyBtn(b, 'Syncing…');
+      await sync();
+      if (syncState.kind === 'ok') confirmBtn(b, 'Synced ✓'); else { restoreBtn(b); }
+    });
     $('backup').addEventListener('click', onBackup);
     $('reconnect').addEventListener('click', openSetup);
     ['cStart', 'cEnd', 'cSalary'].forEach(id => $(id).addEventListener('input', () => { contractDirty = true; }));
-    $('cSave').addEventListener('click', onContractSave);
+    $('cSave').addEventListener('click', async e => { const b = e.currentTarget; busyBtn(b, 'Saving…'); try { await onContractSave(); } finally { restoreBtn(b); } });
     $('payFile').addEventListener('change', onFileChosen);
     $('payManual').addEventListener('click', () => openPayForm({ id: uuid() }, { isNew: true }));
     $('payCancel').addEventListener('click', closePayForm);
@@ -1899,7 +1976,7 @@
       const p = payList().find(x => x.id === li.dataset.pay);
       if (p) openPayForm(p);
     });
-    $('mwCheck').addEventListener('click', onRateCheck);
+    $('mwCheck').addEventListener('click', async e => { const b = e.currentTarget; busyBtn(b, 'Checking GOV.UK…'); try { await onRateCheck(); } finally { restoreBtn(b); } });
     $('docFile').addEventListener('change', onDocChosen);
     $('shiftAdd').addEventListener('click', () => openShiftForm({ id: uuid(), date: calSel }, true));
     $('shiftCancel').addEventListener('click', () => { $('shiftForm').classList.add('hidden'); shiftEditing = null; });
@@ -1928,8 +2005,11 @@
         out: base + '&api=toggle&want=OUT',
         note: base + '&api=note&text=',
       }[b.dataset.sc];
-      try { await navigator.clipboard.writeText(link); $('scMsg').textContent = 'Copied. Paste it into the Shortcut (see the steps you were sent).'; }
-      catch (er) { prompt('Copy this link:', link); }
+      try {
+        await navigator.clipboard.writeText(link);
+        confirmBtn(b, 'Copied ✓');
+        $('scMsg').textContent = 'Copied "' + b.textContent.replace(' ✓', '') + '" link. Paste it into the Shortcut\'s "Get Contents of URL" step.';
+      } catch (er) { prompt('Copy this link:', link); }
     });
     document.querySelectorAll('details').forEach(dt => dt.addEventListener('toggle', () => { if (dt.open && dt.querySelector('#ntfyBox')) loadNtfy(); }));
     $('leaveAllowance').addEventListener('click', e => {

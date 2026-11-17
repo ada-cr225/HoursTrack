@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Hours">
-  <meta name="app-version" content="1.6.0">
+  <meta name="app-version" content="1.6.1">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
@@ -149,6 +149,21 @@
     .chips button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
     .cell .sh { position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); width: 14px; height: 3px; border-radius: 2px; background: var(--accent); }
     .topic { font-family: ui-monospace, Menlo, monospace; font-size: 13px; background: var(--soft); padding: 8px 10px; border-radius: 8px; overflow-wrap: anywhere; }
+    /* Press feedback everywhere: a quick shrink + darken while the finger is down ("pressed" is set by
+       app.js on touch, so it shows even on a fast tap), and a green tick on buttons that confirm. */
+    button, .btn, label.btn, a.btn, summary, ul.list li.click, .cell, .navbtn { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+    button, .btn, label.btn, a.btn, .cell, .navbtn, .seg button, .chips button, .tabs button {
+      transition: transform .09s ease, filter .09s ease, background-color .2s ease, color .2s ease;
+    }
+    button.pressed, .btn.pressed, label.btn.pressed, a.btn.pressed, .cell.pressed, .navbtn.pressed, .seg button.pressed, .chips button.pressed,
+    button:active, .btn:active, label.btn:active, .cell:active, .navbtn:active { transform: scale(.95); filter: brightness(.88); }
+    .tabs button.pressed, .tabs button:active { transform: scale(.9); filter: none; color: var(--ink); }
+    .big.pressed, .big:active { transform: scale(.97); filter: brightness(.9); }
+    ul.list li.click.pressed, details summary.pressed { background: var(--soft); border-radius: 10px; }
+    ul.list li.click { transition: background-color .15s ease; }
+    .btn.done, button.done { background: var(--in) !important; color: #fff !important; }
+    .btn.busy { opacity: .7; }
+    @media (prefers-reduced-motion: reduce) { button.pressed, .btn.pressed, .cell.pressed, .big.pressed, button:active, .btn:active { transform: none; } }
     .docrow { display: flex; gap: 8px; align-items: center; margin-top: 8px; min-width: 0; }
     .flagline { color: var(--out); font-size: 14px; margin-top: 6px; }
     .mwbox { background: var(--soft); border-radius: 12px; padding: 12px; }
@@ -586,6 +601,6 @@
   <button type="button" id="toastUndo">Undo</button>
 </div>
 
-<script src="app.js?v=1.6.0"></script>
+<script src="app.js?v=1.6.1"></script>
 </body>
 </html>
