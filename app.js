@@ -10,9 +10,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const TZ = 'Europe/London';
-  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar' };
+  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments' };
   const UNDO_MS = 2 * 60 * 1000;        // the server allows 3 minutes; keep a margin
   const TIMEOUT_MS = 15000;
   const RETRY_MS = 15000;
@@ -162,8 +162,71 @@
     }
   }
 
+  /** POST (used for file uploads). text/plain keeps it a "simple" request, so no CORS preflight. */
+  async function apiPost(body) {
+    if (!cfg) throw new ApiError('Not set up yet.', 'setup');
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 90000); // reading a payslip can take a while
+    let text;
+    try {
+      const resp = await fetch(cfg.url, {
+        method: 'POST', cache: 'no-store', redirect: 'follow', signal: ctl.signal,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({}, body, { k: cfg.key })),
+      });
+      text = await resp.text();
+    } catch (e) {
+      throw new ApiError(navigator.onLine === false ? 'No internet connection' : 'Couldn\'t reach Google', 'network');
+    } finally {
+      clearTimeout(timer);
+    }
+    try { return JSON.parse(text); } catch (e) {
+      throw new ApiError('Google returned a web page instead of data. Check the deployment is set to "Anyone".', 'config');
+    }
+  }
+
+  /* Files waiting to upload live in IndexedDB (localStorage is too small for PDFs and photos). */
+  const fileStore = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      if (!('indexedDB' in window)) return rej(new Error('This phone can\'t store files offline.'));
+      const r = indexedDB.open('hours-clock-files', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('files');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error || new Error('Couldn\'t open file storage.'));
+    }));
+    const tx = async (mode, fn) => {
+      const db = await open();
+      return new Promise((res, rej) => {
+        const t = db.transaction('files', mode);
+        const req = fn(t.objectStore('files'));
+        t.oncomplete = () => res(req && req.result);
+        t.onerror = () => rej(t.error || new Error('File storage error.'));
+        t.onabort = () => rej(t.error || new Error('File storage was full or blocked.'));
+      });
+    };
+    return {
+      put: (id, blob) => tx('readwrite', st => st.put(blob, id)),
+      get: id => tx('readonly', st => st.get(id)),
+      del: id => tx('readwrite', st => st.delete(id)).catch(() => {}),
+    };
+  })();
+
+  const blobToBase64 = blob => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1] || '');
+    r.onerror = () => rej(r.error || new Error('Couldn\'t read the file.'));
+    r.readAsDataURL(blob);
+  });
+
   function paramsFor(item) {
     if (item.op === 'void') return { api: 'void', id: item.id, target: item.target, ts: String(item.ts) };
+    if (item.op === 'paymentDelete') return { api: 'paymentDelete', id: item.id };
+    if (item.op === 'payment') {
+      const p = { api: 'payment', id: item.id };
+      Object.keys(item.fields).forEach(k => { if (item.fields[k] !== '' && item.fields[k] != null) p[k] = String(item.fields[k]); });
+      return p;
+    }
     const p = { api: 'event', id: item.id, action: item.action, ts: String(item.ts) };
     if (item.loc) p.loc = item.loc;
     if (item.note) p.note = item.note;
@@ -189,9 +252,12 @@
     renderSync();
   }
 
+  let syncAgain = false;
   async function sync() {
-    if (syncing || !cfg) return;
+    if (!cfg) return;
+    if (syncing) { syncAgain = true; return; } // e.g. signal came back mid-attempt: run again as soon as this one ends
     syncing = true;
+    syncAgain = false;
     setSync('syncing');
     let rerun = false;
     try {
@@ -200,7 +266,17 @@
         inflightId = item.id;
         let res;
         try {
-          res = await api(paramsFor(item));
+          if (item.op === 'upload') {
+            let blob;
+            try { blob = await fileStore.get(item.fileKey); } catch (e) { blob = null; }
+            if (!blob) {
+              res = { ok: false, code: 'rejected', error: 'The file is no longer on this phone. Upload it again.' };
+            } else {
+              res = await apiPost({ api: 'upload', id: item.id, filename: item.filename, mimeType: item.mime, data: await blobToBase64(blob) });
+            }
+          } else {
+            res = await api(paramsFor(item));
+          }
         } catch (e) {
           setSync(e.kind === 'network' ? 'offline' : 'error', e.message);
           return;
@@ -211,6 +287,8 @@
           queue = queue.filter(q => q.id !== item.id);
           saveQueue();
           applySnapshot(res);
+          if (res.payments) applyPayments(res);
+          if (item.op === 'upload') { fileStore.del(item.fileKey); onUploadDone(item, res); }
           continue;
         }
         if (res.code === 'auth') { setSync('auth', res.error); return; }
@@ -231,14 +309,19 @@
         setSync(e.kind === 'network' ? 'offline' : 'error', e.message);
         return;
       }
-      if (res.ok) { applySnapshot(res); setSync('ok'); if (view === 'calendar') loadCalendar(false); }
+      if (res.ok) {
+        applySnapshot(res); setSync('ok');
+        if (view === 'calendar') loadCalendar(false);
+        if (view === 'pay') loadPayments(false);
+      }
       else if (res.code === 'auth') setSync('auth', res.error);
       else setSync('error', res.error);
     } finally {
       syncing = false;
-      rerun = queue.length > 0 && (syncState.kind === 'ok' || syncState.kind === 'syncing');
+      rerun = syncAgain || (queue.length > 0 && (syncState.kind === 'ok' || syncState.kind === 'syncing'));
+      syncAgain = false;
       renderAll();
-      if (rerun) setTimeout(sync, 0); // something was tapped while we were busy
+      if (rerun) setTimeout(sync, 0); // something was tapped, or signal returned, while we were busy
     }
   }
 
@@ -481,7 +564,9 @@
     card.classList.toggle('hidden', !failed.length);
     if (!failed.length) return;
     $('failed').innerHTML = failed.map((f, i) => {
-      const what = f.op === 'void' ? 'Undo' : f.action === 'IN' ? 'Clock-in' : f.action === 'OUT' ? 'Clock-out' : 'Note';
+      const what = f.op === 'void' ? 'Undo' : f.op === 'upload' ? 'Payslip upload (' + (f.filename || 'file') + ')'
+        : f.op === 'payment' ? 'Payment' : f.op === 'paymentDelete' ? 'Payment removal'
+        : f.action === 'IN' ? 'Clock-in' : f.action === 'OUT' ? 'Clock-out' : 'Note';
       const when = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(f.ts));
       return '<li><span class="grow"><b>' + esc(what) + ' · ' + esc(when) + '</b><br><span class="sub">' + esc(f.error) + '</span></span>' +
         '<button class="btn ghost small" data-dismiss="' + i + '" type="button">Dismiss</button></li>';
@@ -591,10 +676,12 @@
     $('tabs').classList.toggle('hidden', !cfg || setupOpen);
     $('viewToday').classList.toggle('hidden', view !== 'today');
     $('viewCal').classList.toggle('hidden', view !== 'calendar');
+    $('viewPay').classList.toggle('hidden', view !== 'pay');
     document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === view));
     renderSync();
     if (!cfg) return;
     if (view === 'calendar') renderCalendar();
+    if (view === 'pay') renderPay();
     renderTick();
     renderTaps();
     renderMonth();
@@ -606,7 +693,7 @@
   /* ---------------- calendar ---------------- */
 
   let cal = store.get(KEYS.cal, null);
-  let view = prefs.view === 'calendar' ? 'calendar' : 'today';
+  let view = prefs.view === 'calendar' || prefs.view === 'pay' ? prefs.view : 'today';
   let calMonth = null;   // 'yyyy-MM' being shown
   let calSel = null;     // 'yyyy-MM-dd' selected
   let calErr = '';
@@ -784,12 +871,231 @@
   }
 
   function setView(v) {
-    view = v === 'calendar' ? 'calendar' : 'today';
+    view = v === 'calendar' || v === 'pay' ? v : 'today';
     prefs.view = view;
     store.set(KEYS.prefs, prefs);
     renderAll();
     window.scrollTo(0, 0);
     if (view === 'calendar') loadCalendar(false);
+    if (view === 'pay') loadPayments(false);
+  }
+
+  /* ---------------- payments ---------------- */
+
+  let pay = store.get(KEYS.pay, null);   // last payments view from the sheet
+  let payLoading = false, payErr = '', lastPayLoad = 0;
+  let editing = null;                     // { id, isNew, reading }
+  const MAX_UPLOAD = 15 * 1024 * 1024;
+  const money = v => (v == null || v === '' || isNaN(Number(v)) ? '—' : '£' + Number(v).toFixed(2));
+  const monthLabel = mk => mk ? new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(mk + '-15T12:00:00Z')) : '';
+  const shortDate = k => k ? new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(new Date(k + 'T12:00:00Z')) : '';
+
+  function applyPayments(res) {
+    pay = { payments: res.payments, months: res.months, ocrAvailable: res.ocrAvailable, receivedAt: Date.now() };
+    store.set(KEYS.pay, pay);
+    lastPayLoad = Date.now();
+    payErr = ''; // fresh data from the sheet: any earlier "couldn't update" no longer applies
+  }
+
+  async function loadPayments(force) {
+    if (!cfg || payLoading) return;
+    if (!force && Date.now() - lastPayLoad < 30000) return;
+    payLoading = true;
+    try {
+      const res = await api({ api: 'payments' });
+      if (res.ok) { applyPayments(res); payErr = ''; } else payErr = res.error;
+    } catch (e) { payErr = e.message; }
+    finally { payLoading = false; if (view === 'pay') renderPay(); }
+  }
+
+  /** Server list with anything still waiting on the phone laid over the top. */
+  function payList() {
+    const byId = {};
+    ((pay && pay.payments) || []).forEach(p => { byId[p.id] = Object.assign({}, p); });
+    const n = v => (v === '' || v == null ? null : Number(v));
+    queue.forEach(q => {
+      if (q.op === 'payment') {
+        byId[q.id] = Object.assign({}, byId[q.id] || {}, q.fields, {
+          id: q.id, status: 'Confirmed', pendingSave: true,
+          amount: n(q.fields.amount), gross: n(q.fields.gross), net: n(q.fields.net),
+          tax: n(q.fields.tax), ni: n(q.fields.ni), pension: n(q.fields.pension),
+        });
+      }
+      if (q.op === 'paymentDelete') delete byId[q.id];
+      if (q.op === 'upload' && !byId[q.id]) {
+        byId[q.id] = { id: q.id, uploading: true, filename: q.filename, received: dayKey(q.ts), status: 'Waiting to upload' };
+      }
+    });
+    return Object.values(byId).sort((a, b) => ((b.received || b.period || '') > (a.received || a.period || '') ? 1 : -1));
+  }
+
+  function renderPay() {
+    const list = payList();
+    const waitingUploads = queue.filter(q => q.op === 'upload').length;
+    if (waitingUploads && (syncState.kind === 'offline' || syncState.kind === 'error' || syncState.kind === 'auth')) {
+      $('payErr').className = 'okmsg';
+      $('payErr').textContent = waitingUploads + ' payslip' + (waitingUploads > 1 ? 's' : '') +
+        ' saved on your phone — ' + (waitingUploads > 1 ? 'they\'ll' : 'it\'ll') + ' upload and be read when you have signal.';
+    }
+    const ul = $('payList');
+    if (!list.length) {
+      ul.innerHTML = '<li class="empty">No payments yet. Upload a payslip or enter one manually.</li>';
+    } else {
+      ul.innerHTML = list.map(p => {
+        const chip = p.uploading ? '<span class="chip wait">' + (syncState.kind === 'syncing' ? 'uploading…' : 'on phone') + '</span>'
+          : p.pendingSave ? '<span class="chip wait">on phone</span>'
+          : p.status === 'Confirmed' ? '<span class="chip ok">confirmed</span>'
+          : '<span class="chip wait">needs review</span>';
+        const title = p.uploading ? esc(p.filename || 'Payslip')
+          : '<span class="payamt">' + money(p.amount) + '</span>' + (p.period ? ' · ' + esc(monthLabel(p.period)) : '');
+        const meta = p.uploading ? 'Will upload and be read when you have signal'
+          : [p.received ? 'Received ' + shortDate(p.received) : '', p.gross != null ? 'gross ' + money(p.gross) : '',
+            p.source === 'upload' ? 'payslip attached' : ''].filter(Boolean).join(' · ');
+        const doc = p.docUrl ? ' · <a href="' + esc(p.docUrl) + '" target="_blank" rel="noopener" data-doc="1">open payslip</a>' : '';
+        return '<li class="' + (p.uploading ? '' : 'click') + '" data-pay="' + esc(p.id) + '"><span class="grow">' + title +
+          '<br><span class="paymeta">' + esc(meta) + doc + '</span></span>' + chip + '</li>';
+      }).join('');
+    }
+
+    const months = (pay && pay.months) || [];
+    $('payMonths').innerHTML = months.length ? months.map(m =>
+      '<div style="padding:8px 0;border-bottom:1px solid var(--line)"><div class="kv" style="margin:0"><b>' + esc(monthLabel(m.month)) + '</b>' +
+      (m.flags.length ? '<span class="chip bad">' + m.flags.length + ' to check</span>' : '<span class="chip ok">matches</span>') + '</div>' +
+      '<div class="paymeta">Received ' + money(m.received) + ' · payslip gross ' + money(m.gross) +
+      (m.estimate != null ? ' · contract implies ' + money(m.estimate) : '') + '</div>' +
+      m.flags.map(f => '<div class="flagline">' + esc(f) + '</div>').join('') + '</div>').join('')
+      : '<p class="empty">Checks appear once you confirm a payment.</p>';
+
+    $('payFresh').textContent = payErr
+      ? 'Couldn\'t update (' + payErr + ').' + (pay ? ' Showing the copy saved ' + hm(pay.receivedAt) + '.' : '')
+      : pay ? 'From your sheet, updated ' + hm(pay.receivedAt) + '.' +
+        (pay.ocrAvailable === false ? ' Automatic reading is off — turn on the Drive API service in Apps Script.' : '')
+      : 'Open with signal to load your payments.';
+  }
+
+  const FIELDS = [['pReceived', 'received'], ['pAmount', 'amount'], ['pPeriod', 'period'], ['pGross', 'gross'], ['pNet', 'net'],
+    ['pTax', 'tax'], ['pNi', 'ni'], ['pPension', 'pension'], ['pPayDate', 'payDate'], ['pPayer', 'payer'],
+    ['pRef', 'reference'], ['pNotes', 'notes']];
+
+  function openPayForm(p, opts = {}) {
+    editing = { id: p.id, isNew: !!opts.isNew, reading: opts.reading || null };
+    const r = opts.reading;
+    const read = r ? Object.keys(r.fields || {}).filter(k => r.fields[k] != null) : [];
+    const autoFor = { received: 'payDate', amount: 'net' };
+    FIELDS.forEach(([el, k]) => {
+      const v = p[k];
+      $(el).value = v == null ? '' : String(v);
+      $(el).classList.toggle('auto', read.indexOf(k) >= 0 || read.indexOf(autoFor[k]) >= 0);
+    });
+    if (!$('pReceived').value) $('pReceived').value = dayKey(Date.now());
+    if (!$('pPeriod').value && $('pReceived').value) $('pPeriod').value = $('pReceived').value.slice(0, 7);
+    $('payFormTitle').textContent = opts.isNew ? 'New payment' : p.status === 'Needs review' ? 'Check the figures' : 'Edit payment';
+    $('payDelete').classList.toggle('hidden', !!opts.isNew);
+    $('payFormErr').textContent = '';
+    const notes = r ? r.notes : (p.readingNotes ? [p.readingNotes] : []);
+    const heading = r ? {
+      high: 'Read automatically — please check',
+      medium: 'Read automatically — check carefully',
+      low: 'Only partly read — fill in the rest',
+      none: 'Couldn\'t read this payslip — enter the figures',
+    }[r.confidence] : 'Payslip attached';
+    $('payReading').innerHTML = (r || p.docUrl)
+      ? '<div class="banner ' + (r && r.confidence === 'high' ? 'info' : 'warn') + '" style="margin:0"><div><strong>' + esc(heading) + '</strong>' +
+        esc(notes.join(' ')) +
+        (p.docUrl ? ' <a href="' + esc(p.docUrl) + '" target="_blank" rel="noopener">Open payslip</a>' : '') +
+        (read.length ? '<br><span class="paymeta">Highlighted boxes were filled from the payslip.</span>' : '') + '</div></div>'
+      : '';
+    $('payForm').classList.remove('hidden');
+    $('payForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function closePayForm() {
+    editing = null;
+    $('payForm').classList.add('hidden');
+    const m = $('payErr');
+    if (/Check the figures/.test(m.textContent)) m.textContent = ''; // the review prompt is done with
+  }
+
+  function onPaySave() {
+    const err = $('payFormErr');
+    err.textContent = '';
+    if (!editing) return;
+    const f = {};
+    FIELDS.forEach(([el, k]) => { f[k] = $(el).value.trim(); });
+    if (!f.received) { err.textContent = 'Enter the date the money arrived.'; return; }
+    if (f.amount === '' || !(Number(f.amount) >= 0)) { err.textContent = 'Enter the amount received.'; return; }
+    if (!/^\d{4}-\d{2}$/.test(f.period)) { err.textContent = 'Choose the month this payment covers.'; return; }
+    for (const k of ['amount', 'gross', 'net', 'tax', 'ni', 'pension']) {
+      if (f[k] !== '' && !(Number(f[k]) >= 0)) { err.textContent = 'Check the ' + k + ' amount.'; return; }
+    }
+    if (f.gross !== '' && f.net !== '' && Number(f.net) > Number(f.gross)) {
+      err.textContent = 'Net pay can\'t be more than gross pay — check the figures.'; return;
+    }
+    const id = editing.id;
+    queue = queue.filter(q => !(q.op === 'payment' && q.id === id));
+    closePayForm();
+    enqueue({ op: 'payment', id, ts: Date.now(), fields: f });
+  }
+
+  function onPayDelete() {
+    if (!editing) return;
+    if (!confirm('Remove this payment? It stays in your sheet marked as deleted, and its payslip stays in your Drive.')) return;
+    const id = editing.id;
+    const onlyOnPhone = !((pay && pay.payments) || []).some(p => p.id === id);
+    queue = queue.filter(q => !(q.op === 'payment' && q.id === id));
+    closePayForm();
+    if (onlyOnPhone) { saveQueue(); renderAll(); } else enqueue({ op: 'paymentDelete', id, ts: Date.now() });
+  }
+
+  /** Photos are shrunk before upload: smaller and faster, and still easily readable. */
+  async function prepareFile(file) {
+    if (!/^image\//.test(file.type) || !window.createImageBitmap) return file;
+    try {
+      const bmp = await createImageBitmap(file);
+      const scale = Math.min(1, 2200 / Math.max(bmp.width, bmp.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+      const out = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.85));
+      return out && out.size < file.size ? new File([out], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' }) : file;
+    } catch (e) {
+      return file; // a format this browser can't decode: send the original
+    }
+  }
+
+  async function onFileChosen(e) {
+    const msg = $('payErr');
+    msg.className = 'err'; msg.textContent = '';
+    const input = e.target;
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    if (!/^application\/pdf$|^image\/(jpeg|png|heic|heif|webp)$/.test(file.type)) {
+      msg.textContent = 'Upload a PDF or a photo (JPEG, PNG or HEIC).'; return;
+    }
+    const prepared = await prepareFile(file);
+    if (prepared.size > MAX_UPLOAD) { msg.textContent = 'That file is larger than 15 MB.'; return; }
+    const id = uuid();
+    try {
+      await fileStore.put(id, prepared);
+    } catch (e2) {
+      msg.textContent = 'This phone wouldn\'t store the file (' + e2.message + '). Try again.';
+      return;
+    }
+    msg.className = 'okmsg';
+    msg.textContent = navigator.onLine === false
+      ? 'Saved on your phone — it will upload and be read when you have signal.'
+      : 'Uploading and reading your payslip…';
+    enqueue({ op: 'upload', id, fileKey: id, filename: prepared.name || 'payslip', mime: prepared.type, size: prepared.size, ts: Date.now() });
+  }
+
+  function onUploadDone(item, res) {
+    const p = (res.payments || []).find(x => x.id === item.id);
+    if (view === 'pay' && p && !editing && p.status === 'Needs review') {
+      openPayForm(p, { reading: res.reading });
+      $('payErr').className = 'okmsg';
+      $('payErr').textContent = 'Payslip stored in your Drive. Check the figures below and confirm.';
+    }
   }
 
   /* ---------------- setup ---------------- */
@@ -860,7 +1166,9 @@
 
   async function onBackup() {
     const pending = queue.map(q => ({
-      what: q.op === 'void' ? 'undo' : q.action, time: new Date(q.ts).toISOString(), london: dayKey(q.ts) + ' ' + hm(q.ts),
+      what: q.op === 'void' ? 'undo' : q.op === 'upload' ? 'payslip upload: ' + q.filename : q.op === 'payment' ? 'payment'
+        : q.op === 'paymentDelete' ? 'payment removal' : q.action,
+      time: q.ts ? new Date(q.ts).toISOString() : '', london: q.ts ? dayKey(q.ts) + ' ' + hm(q.ts) : '', fields: q.fields || undefined,
       location: q.loc || '', note: q.note || '', manual: !!q.manual, id: q.id,
     }));
     const text = pending.length ? JSON.stringify(pending, null, 2) : 'No taps are waiting to sync.';
@@ -886,6 +1194,18 @@
     $('reconnect').addEventListener('click', openSetup);
     ['cStart', 'cEnd', 'cSalary'].forEach(id => $(id).addEventListener('input', () => { contractDirty = true; }));
     $('cSave').addEventListener('click', onContractSave);
+    $('payFile').addEventListener('change', onFileChosen);
+    $('payManual').addEventListener('click', () => openPayForm({ id: uuid() }, { isNew: true }));
+    $('payCancel').addEventListener('click', closePayForm);
+    $('paySave').addEventListener('click', onPaySave);
+    $('payDelete').addEventListener('click', onPayDelete);
+    $('payList').addEventListener('click', e => {
+      if (e.target.closest('[data-doc]')) return; // let "open payslip" links work
+      const li = e.target.closest('[data-pay]');
+      if (!li || !li.classList.contains('click')) return;
+      const p = payList().find(x => x.id === li.dataset.pay);
+      if (p) openPayForm(p);
+    });
     $('mwCheck').addEventListener('click', onRateCheck);
     $('setupConnect').addEventListener('click', onConnect);
     $('setupForce').addEventListener('click', onForceSave);
@@ -924,12 +1244,13 @@
       renderAll();
       sync();
       if (view === 'calendar') loadCalendar(false);
+      if (view === 'pay') loadPayments(false);
     });
     window.addEventListener('pageshow', () => renderAll());
     // Another copy of the app (e.g. a second tab) changed storage: reload our view of it.
     window.addEventListener('storage', () => {
       queue = store.get(KEYS.queue, []); failed = store.get(KEYS.failed, []);
-      snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null); cal = store.get(KEYS.cal, null);
+      snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null); cal = store.get(KEYS.cal, null); pay = store.get(KEYS.pay, null);
       renderAll();
     });
 
@@ -954,6 +1275,7 @@
   renderAll();
   sync();
   if (cfg && view === 'calendar') loadCalendar(true);
+  if (cfg && view === 'pay') loadPayments(true);
 
   // Exposed for automated tests only.
   window.__hoursClock = { computeDay, model, londonToEpoch, dayKey, setView, get queue() { return queue; }, get failed() { return failed; }, sync };

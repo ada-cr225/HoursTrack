@@ -137,6 +137,11 @@
     .sechead { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
     .grid2 > .sechead:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
     .okmsg { color: var(--in); }
+    input.auto { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+    .paymeta { font-size: 13px; color: var(--muted); }
+    .payamt { font-weight: 700; font-variant-numeric: tabular-nums; }
+    ul.list li.click { cursor: pointer; }
+    .flagline { color: var(--out); font-size: 14px; margin-top: 6px; }
     .mwbox { background: var(--soft); border-radius: 12px; padding: 12px; }
     .mwbox .big-rate { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
     .mwbox a { color: var(--accent); }
@@ -146,7 +151,7 @@
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 9; display: grid; grid-template-columns: 1fr 1fr;
       background: color-mix(in srgb, var(--card) 92%, transparent); backdrop-filter: saturate(1.6) blur(14px);
       -webkit-backdrop-filter: saturate(1.6) blur(14px);
-      border-top: 1px solid var(--line); padding: 6px 16px calc(env(safe-area-inset-bottom) + 6px);
+      border-top: 1px solid var(--line); padding: 6px 16px calc(env(safe-area-inset-bottom) + 6px); grid-template-columns: repeat(3, 1fr);
     }
     .tabs button {
       border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 600;
@@ -351,12 +356,63 @@
       </section>
       <p class="note" id="calFresh" style="text-align:center"></p>
     </div>
+
+    <div id="viewPay" class="hidden">
+      <section class="card">
+        <h2>Add a payment</h2>
+        <div class="row">
+          <label class="btn" for="payFile" id="payUploadBtn" style="flex:1;text-align:center;cursor:pointer">Upload payslip</label>
+          <input type="file" id="payFile" accept="application/pdf,image/*" style="display:none">
+          <button class="btn ghost" id="payManual" type="button" style="flex:1">Enter manually</button>
+        </div>
+        <p class="note">PDFs and photos are stored privately in your Google Drive and read automatically. Nothing is used until you confirm the figures. Uploads made with no signal wait on your phone.</p>
+        <div class="err" id="payErr" role="status"></div>
+      </section>
+
+      <section class="card hidden" id="payForm">
+        <div class="calhead" style="margin-bottom:6px">
+          <h2 id="payFormTitle" style="margin:0">Payment</h2>
+          <button class="btn ghost small" id="payCancel" type="button">Close</button>
+        </div>
+        <div id="payReading"></div>
+        <div class="grid2" style="margin-top:10px">
+          <div><label for="pReceived">Date received</label><input type="date" id="pReceived"></div>
+          <div><label for="pAmount">Amount received (£)</label><input id="pAmount" type="number" inputmode="decimal" min="0" step="0.01"></div>
+          <div class="full"><label for="pPeriod">Pay period (month it covers)</label><input type="month" id="pPeriod"></div>
+          <div class="full sechead">From the payslip</div>
+          <div><label for="pGross">Gross pay (£)</label><input id="pGross" type="number" inputmode="decimal" min="0" step="0.01"></div>
+          <div><label for="pNet">Net pay (£)</label><input id="pNet" type="number" inputmode="decimal" min="0" step="0.01"></div>
+          <div><label for="pTax">Tax (£)</label><input id="pTax" type="number" inputmode="decimal" min="0" step="0.01"></div>
+          <div><label for="pNi">NI (£)</label><input id="pNi" type="number" inputmode="decimal" min="0" step="0.01"></div>
+          <div><label for="pPension">Pension (£)</label><input id="pPension" type="number" inputmode="decimal" min="0" step="0.01"></div>
+          <div><label for="pPayDate">Pay date on payslip</label><input type="date" id="pPayDate"></div>
+          <div class="full"><label for="pPayer">Payer</label><input id="pPayer" maxlength="120" placeholder="e.g. Fuse Energy Supply Ltd"></div>
+          <div class="full"><label for="pRef">Reference</label><input id="pRef" maxlength="120" placeholder="Bank reference (optional)"></div>
+          <div class="full"><label for="pNotes">Notes</label><input id="pNotes" maxlength="500"></div>
+          <div class="full"><button class="btn" id="paySave" type="button" style="width:100%">Confirm and save</button></div>
+          <div class="full"><button class="btn ghost hidden" id="payDelete" type="button" style="width:100%;color:var(--out)">Remove this payment</button></div>
+        </div>
+        <div class="err" id="payFormErr" role="status"></div>
+      </section>
+
+      <section class="card">
+        <h2>Checks</h2>
+        <div id="payMonths"></div>
+      </section>
+
+      <section class="card">
+        <h2>Payments</h2>
+        <ul class="list" id="payList"></ul>
+      </section>
+      <p class="note" id="payFresh" style="text-align:center"></p>
+    </div>
   </main>
 </div>
 
 <nav class="tabs hidden" id="tabs" aria-label="Views">
   <button type="button" data-view="today" class="on"><span class="ico">◷</span>Today</button>
   <button type="button" data-view="calendar"><span class="ico">▦</span>Calendar</button>
+  <button type="button" data-view="pay"><span class="ico">£</span>Pay</button>
 </nav>
 
 <div class="toast hidden" id="toast" role="status">
