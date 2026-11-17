@@ -10,9 +10,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
   const TZ = 'Europe/London';
-  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments' };
+  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments', leave: 'hc.leave' };
   const UNDO_MS = 2 * 60 * 1000;        // the server allows 3 minutes; keep a margin
   const TIMEOUT_MS = 15000;
   const RETRY_MS = 15000;
@@ -222,6 +222,12 @@
   function paramsFor(item) {
     if (item.op === 'void') return { api: 'void', id: item.id, target: item.target, ts: String(item.ts) };
     if (item.op === 'paymentDelete') return { api: 'paymentDelete', id: item.id };
+    if (item.op === 'leaveDelete') return { api: 'leaveDelete', id: item.id };
+    if (item.op === 'leave') {
+      const p = { api: 'leaveSave', id: item.id };
+      Object.keys(item.fields).forEach(k => { if (item.fields[k] !== '' && item.fields[k] != null) p[k] = String(item.fields[k]); });
+      return p;
+    }
     if (item.op === 'payment') {
       const p = { api: 'payment', id: item.id };
       Object.keys(item.fields).forEach(k => { if (item.fields[k] !== '' && item.fields[k] != null) p[k] = String(item.fields[k]); });
@@ -288,6 +294,7 @@
           saveQueue();
           applySnapshot(res);
           if (res.payments) applyPayments(res);
+          if (res.allowance !== undefined && res.entries) { applyLeave(res); lastCalLoad = 0; }
           if (item.op === 'upload') { fileStore.del(item.fileKey); onUploadDone(item, res); }
           continue;
         }
@@ -313,6 +320,7 @@
         applySnapshot(res); setSync('ok');
         if (view === 'calendar') loadCalendar(false);
         if (view === 'pay') loadPayments(false);
+        if (view === 'leave') loadLeave(false);
       }
       else if (res.code === 'auth') setSync('auth', res.error);
       else setSync('error', res.error);
@@ -453,6 +461,11 @@
     } else if (!m.working && !m.events.length && snap && snap.prevFinish && now - snap.prevFinish < REST_MS) {
       out.push(['warn', 'Still in your rest period', 'You finished at ' + hm(snap.prevFinish) + '. 11 hours\' rest ends at ' + hm(snap.prevFinish + REST_MS) + '.']);
     }
+    if (snap && snap.leave && snap.leave.today && snap.date === m.today) {
+      const t = snap.leave.today;
+      out.push(['info', 'On ' + t.type.toLowerCase() + ' today' + (t.partFrom ? ' (' + t.partFrom + '–' + t.partTo + ')' : ''),
+        'If you\'re asked to work anyway, clock in so it\'s recorded — and note who asked.']);
+    }
     const html = out.map(([k, t, b]) => '<div class="banner ' + k + '"><div><strong>' + esc(t) + '</strong>' + esc(b) + '</div></div>').join('');
     const el = $('banners');
     if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
@@ -541,6 +554,9 @@
       '<div class="kv"><span>Minimum wage</span><span class="num">' + (mo.minimumWage ? '£' + mo.minimumWage.toFixed(2) + '/h' : '—') + '</span></div>' +
       '<div class="kv"><span>Status</span><span class="chip ' + (under ? 'bad' : mo.status === 'OK' ? 'ok' : 'muted') + '">' + esc(mo.status || '—') + '</span></div>' +
       (under && mo.shortfall ? '<div class="kv"><span>Shortfall</span><b class="num" style="color:var(--out)">£' + mo.shortfall.toFixed(2) + '</b></div>' : '') +
+      (mo.leavePay ? '<div class="kv"><span>Paid leave left out of the check</span><span class="num">£' + mo.leavePay.toFixed(2) + '</span></div>' : '') +
+      (snap.leave ? '<div class="kv"><span>Holiday left</span><span class="num">' + nDays(snap.leave.remaining) + ' days (' + nDays(snap.leave.availableNow) + ' bookable now)</span></div>' +
+        (snap.leave.next ? '<div class="kv"><span>Next</span><span>' + esc(snap.leave.next.type) + ' ' + esc(dShort(snap.leave.next.from)) + (snap.leave.next.to !== snap.leave.next.from ? ' – ' + esc(dShort(snap.leave.next.to)) : '') + '</span></div>' : '') : '') +
       '<p class="note">From your sheet' + (snap.receivedAt ? ', updated ' + hm(snap.receivedAt) : '') +
       '. Counts finished days; today is added when you clock out.' +
       (pendingEvents ? ' ' + pendingEvents + ' tap' + (pendingEvents > 1 ? 's' : '') + ' still on your phone aren\'t included yet.' : '') + '</p>';
@@ -566,6 +582,7 @@
     $('failed').innerHTML = failed.map((f, i) => {
       const what = f.op === 'void' ? 'Undo' : f.op === 'upload' ? 'Payslip upload (' + (f.filename || 'file') + ')'
         : f.op === 'payment' ? 'Payment' : f.op === 'paymentDelete' ? 'Payment removal'
+        : f.op === 'leave' ? 'Leave (' + (f.fields.type || '') + ' ' + (f.fields.from || '') + ')' : f.op === 'leaveDelete' ? 'Leave removal'
         : f.action === 'IN' ? 'Clock-in' : f.action === 'OUT' ? 'Clock-out' : 'Note';
       const when = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(f.ts));
       return '<li><span class="grow"><b>' + esc(what) + ' · ' + esc(when) + '</b><br><span class="sub">' + esc(f.error) + '</span></span>' +
@@ -677,11 +694,13 @@
     $('viewToday').classList.toggle('hidden', view !== 'today');
     $('viewCal').classList.toggle('hidden', view !== 'calendar');
     $('viewPay').classList.toggle('hidden', view !== 'pay');
+    $('viewLeave').classList.toggle('hidden', view !== 'leave');
     document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === view));
     renderSync();
     if (!cfg) return;
     if (view === 'calendar') renderCalendar();
     if (view === 'pay') renderPay();
+    if (view === 'leave') renderLeave();
     renderTick();
     renderTaps();
     renderMonth();
@@ -693,7 +712,8 @@
   /* ---------------- calendar ---------------- */
 
   let cal = store.get(KEYS.cal, null);
-  let view = prefs.view === 'calendar' || prefs.view === 'pay' ? prefs.view : 'today';
+  const VIEWS = ['today', 'calendar', 'pay', 'leave'];
+  let view = VIEWS.indexOf(prefs.view) >= 0 ? prefs.view : 'today';
   let calMonth = null;   // 'yyyy-MM' being shown
   let calSel = null;     // 'yyyy-MM-dd' selected
   let calErr = '';
@@ -782,28 +802,46 @@
     for (let d = 1; d <= dim; d++) cells.push(calMonth + '-' + two(d));
     while (cells.length % 7) cells.push(null);
 
+    const lv = leaveByDay();
+    const rest = (cal && cal.weekRest) || {};
+    const restIssues = [];
     let html = '';
     for (let w = 0; w < cells.length; w += 7) {
       let weekTotal = 0;
+      const anyKey = cells.slice(w, w + 7).find(Boolean);
+      const monday = anyKey ? dAdd(anyKey, -((dDow(anyKey) + 6) % 7)) : null;
       cells.slice(w, w + 7).forEach(key => {
         if (!key) { html += '<span class="cell blank"></span>'; return; }
         const d = dayMap[key];
         const h = hoursFor(key);
         weekTotal += h;
         const cls = ['cell'];
-        if (!d && key !== todayKey) cls.push('out');
+        const l = (lv[key] || [])[0];
+        if (!d && key !== todayKey && !l) cls.push('out');
         if (h > 10) cls.push('w4'); else if (h > 8) cls.push('w3'); else if (h >= 4) cls.push('w2'); else if (h > 0) cls.push('w1');
+        else if (l) cls.push(l.type === 'Sick' ? 'sick' : 'hol');
+        if (l && l.status === 'Requested') cls.push('req');
         if (key === todayKey) cls.push('today');
         if (key === calSel) cls.push('sel');
         html += '<button type="button" class="' + cls.join(' ') + '" data-key="' + key + '">' +
           (key === todayKey && m.working ? '<span class="live"></span>' : '') +
           (d && d.flags ? '<span class="flag"></span>' : '') +
           '<span class="d">' + Number(key.slice(8)) + '</span>' +
-          '<span class="h">' + (h >= 0.05 ? fmtH(h) : '') + '</span></button>';
+          (h >= 0.05 ? '<span class="h">' + fmtH(h) + '</span>'
+            : l ? '<span class="lv">' + ({ 'Holiday': 'HOL', 'Bank holiday': 'BH', 'Sick': 'SICK', 'Unpaid': 'UNP' }[l.type] || 'LV') + '</span>' : '<span class="h"></span>') +
+          '</button>';
       });
-      html += '<span class="wk' + (weekTotal > 48 ? ' over' : '') + '"><b>' + (weekTotal >= 0.05 ? fmtH(weekTotal) : '–') + '</b></span>';
+      const r = monday ? rest[monday] : null;
+      const rc = r && r.status === 'breach' ? ' rest-bad' : r && r.status === 'watch' ? ' rest-watch' : '';
+      if (r && (r.status === 'breach' || r.status === 'watch')) restIssues.push([monday, r]);
+      html += '<span class="wk' + (weekTotal > 48 ? ' over' : '') + rc + '"' + (r ? ' title="Longest break this week: ' + r.longestGapH + 'h"' : '') + '><b>' + (weekTotal >= 0.05 ? fmtH(weekTotal) : '–') + '</b>' +
+        (rc ? '<span class="rest">' + (r.status === 'breach' ? 'no 24h off' : 'need 48h off') + '</span>' : '') + '</span>';
     }
     $('calGrid').innerHTML = html;
+    $('restNote').innerHTML = restIssues.length
+      ? restIssues.map(([mk, r]) => '<b style="color:' + (r.status === 'breach' ? 'var(--out)' : 'var(--warn)') + '">Week of ' + esc(dShort(mk)) + ':</b> longest break ' + r.longestGapH + 'h. ' +
+        (r.status === 'breach' ? 'You\'re entitled to 24 hours off in each week, or 48 hours across the fortnight — you got neither.' : 'No 24-hour break this week, so you need 48 hours off together before the fortnight ends.')).join('<br>')
+      : '';
 
     renderCalMonth(dayMap, todayKey);
     renderDay(calSel, dayMap[calSel], calSel === todayKey, m);
@@ -829,6 +867,7 @@
         '<div class="fact"><span>Days worked</span><b>' + worked + '</b></div>' +
       '</div>' +
       '<div class="kv"><span>Gross pay used</span><span class="num">' + (mo.pay != null ? '£' + mo.pay.toFixed(2) : '—') + '</span></div>' +
+      (mo.leavePay ? '<div class="kv"><span>Less pay for paid leave</span><span class="num">−£' + mo.leavePay.toFixed(2) + '</span></div>' : '') +
       '<div class="kv"><span>Minimum-wage ceiling</span><span class="num">' + (mo.maxHours != null ? mo.maxHours.toFixed(1) + ' h' : '—') + '</span></div>' +
       '<div class="kv"><span>Days with break/rest flags</span><span class="num"' + (flagged ? ' style="color:var(--out);font-weight:700"' : '') + '>' + flagged + '</span></div>' +
       '<div class="kv"><span>Status</span><span class="chip ' + (under ? 'bad' : mo.status === 'OK' ? 'ok' : 'muted') + '">' + esc(mo.status || '—') + '</span></div>' +
@@ -855,9 +894,14 @@
       loc = d ? d.location : '';
       events = (cal && cal.events && cal.events[key]) || [];
     }
-    if (!d && !isToday) { el.innerHTML = '<p class="empty">Outside your contract dates.</p>'; return; }
-    if (!start && !events.length) { el.innerHTML = '<p class="empty">No time recorded' + (isToday ? ' yet today.' : '.') + '</p>'; return; }
-    el.innerHTML =
+    const lvs = leaveByDay()[key] || [];
+    const lvHtml = lvs.map(e => '<div class="banner ' + (e.type === 'Sick' ? 'warn' : 'info') + '" style="margin:0 0 10px"><div><strong>' + esc(e.type) +
+      (e.partFrom ? ' ' + esc(e.partFrom) + '–' + esc(e.partTo) : '') + ' · ' + esc(String(e.status).toLowerCase()) + '</strong>' +
+      esc(e.status === 'Approved' ? (e.approvedBy ? 'Approved by ' + e.approvedBy : 'No approver recorded') + (e.approvalRef ? ' — ' + e.approvalRef : '') : 'Waiting for approval') +
+      '</div></div>').join('');
+    if (!d && !isToday && !lvs.length) { el.innerHTML = '<p class="empty">Outside your contract dates.</p>'; return; }
+    if (!start && !events.length) { el.innerHTML = lvHtml + '<p class="empty">No time recorded' + (isToday ? ' yet today.' : '.') + '</p>'; return; }
+    el.innerHTML = lvHtml +
       '<div class="facts">' +
         '<div class="fact"><span>Start</span><b>' + esc(start || '—') + '</b></div>' +
         '<div class="fact"><span>Finish</span><b>' + esc(finish || '—') + '</b></div>' +
@@ -871,13 +915,14 @@
   }
 
   function setView(v) {
-    view = v === 'calendar' || v === 'pay' ? v : 'today';
+    view = VIEWS.indexOf(v) >= 0 ? v : 'today';
     prefs.view = view;
     store.set(KEYS.prefs, prefs);
     renderAll();
     window.scrollTo(0, 0);
     if (view === 'calendar') loadCalendar(false);
     if (view === 'pay') loadPayments(false);
+    if (view === 'leave') loadLeave(false);
   }
 
   /* ---------------- payments ---------------- */
@@ -1098,6 +1143,242 @@
     }
   }
 
+  /* ---------------- holidays and leave ---------------- */
+
+  let leave = store.get(KEYS.leave, null);   // last leave view from the sheet
+  let leaveLoading = false, leaveErr = '', lastLeaveLoad = 0;
+  let leaveEditing = null;                    // { id, isNew }
+  const LEAVE_TYPES = ['Holiday', 'Bank holiday', 'Sick', 'Unpaid', 'Other paid leave'];
+  const LEAVE_STATUSES = ['Requested', 'Approved', 'Refused', 'Cancelled'];
+  const LEAVE_HOW = ['Email', 'Slack', 'HR system', 'In person', 'Phone', 'Other'];
+  const dfmt = (k, opts) => new Intl.DateTimeFormat('en-GB', Object.assign({ timeZone: 'UTC' }, opts)).format(new Date(k + 'T12:00:00Z'));
+  const dShort = k => dfmt(k, { weekday: 'short', day: 'numeric', month: 'short' });
+  const dAdd = (k, n) => new Date(Date.parse(k + 'T12:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+  const dRange = (a, b) => { const out = []; for (let k = a; k <= b && out.length < 400; k = dAdd(k, 1)) out.push(k); return out; };
+  const dDow = k => new Date(k + 'T12:00:00Z').getUTCDay();
+  const nDays = x => (Math.round(x * 100) / 100).toString().replace(/\.0+$/, '').replace(/(\.\d)0$/, '$1');
+  const dayWord = x => nDays(x) + ' day' + (x === 1 ? '' : 's');
+
+  function applyLeave(res) {
+    leave = { entries: res.entries, allowance: res.allowance, bankHolidays: res.bankHolidays, contract: res.contract, receivedAt: Date.now() };
+    store.set(KEYS.leave, leave);
+    lastLeaveLoad = Date.now();
+  }
+
+  async function loadLeave(force) {
+    if (!cfg || leaveLoading) return;
+    if (!force && Date.now() - lastLeaveLoad < 30000) return;
+    leaveLoading = true;
+    try {
+      const res = await api({ api: 'leave' });
+      if (res.ok) { applyLeave(res); leaveErr = ''; } else leaveErr = res.error;
+    } catch (e) { leaveErr = e.message; }
+    finally { leaveLoading = false; if (view === 'leave') renderLeave(); }
+  }
+
+  /** Mirrors the server's default: hours ÷ 8 for part of a day, else Mon–Fri dates (all dates if none). */
+  function defaultDays(from, to, pf, pt) {
+    if (!from || !to || to < from) return '';
+    if (pf && pt) {
+      const mins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+      return Math.max(0, Math.min(1, Math.round((mins(pt) - mins(pf)) / 60 / 8 * 100) / 100));
+    }
+    const all = dRange(from, to);
+    return all.filter(k => dDow(k) >= 1 && dDow(k) <= 5).length || all.length;
+  }
+
+  /** Server entries with anything still waiting on the phone laid over the top. */
+  function leaveList() {
+    const byId = {};
+    ((leave && leave.entries) || []).forEach(e => { byId[e.id] = Object.assign({}, e); });
+    queue.forEach(q => {
+      if (q.op === 'leave') {
+        const f = q.fields;
+        byId[q.id] = Object.assign({}, byId[q.id] || {}, f, {
+          id: q.id, pendingSave: true, to: f.to || f.from, days: f.days === '' ? defaultDays(f.from, f.to || f.from, f.partFrom, f.partTo) : Number(f.days),
+          counts: f.counts === '1',
+        });
+      }
+      if (q.op === 'leaveDelete') delete byId[q.id];
+    });
+    return Object.values(byId).sort((a, b) => (a.from < b.from ? 1 : -1));
+  }
+
+  /** date -> [{type, status, partFrom, partTo}] for the calendar, including changes still on the phone. */
+  function leaveByDay() {
+    const out = {};
+    leaveList().filter(e => e.status === 'Approved' || e.status === 'Requested').forEach(e => {
+      dRange(e.from, e.to).forEach(k => { (out[k] = out[k] || []).push(e); });
+    });
+    return out;
+  }
+
+  function renderLeave() {
+    const a = leave && leave.allowance;
+    const pending = queue.filter(q => q.op === 'leave' || q.op === 'leaveDelete').length;
+    const el = $('leaveAllowance');
+    if (!a) {
+      el.innerHTML = '<p class="empty">Open with signal to load your allowance.</p>';
+    } else {
+      const warnContract = a.contract < a.statutory;
+      el.innerHTML =
+        '<div class="bigfig">' +
+          '<div><span>Can book now</span><b>' + nDays(a.availableNow) + '</b></div>' +
+          '<div><span>Left in contract</span><b' + (a.remaining < 0 ? ' style="color:var(--out)"' : '') + '>' + nDays(a.remaining) + '</b></div>' +
+          '<div><span>Taken</span><b>' + nDays(a.taken) + '</b></div>' +
+        '</div>' +
+        '<table class="cmp"><tr><th></th><th>Legal minimum</th><th>Contract</th></tr>' +
+          '<tr><td>Allowance for your contract</td><td>' + dayWord(a.statutory) + '</td><td>' + dayWord(a.contract) + '</td></tr>' +
+          '<tr><td>Built up so far</td><td>' + dayWord(a.accrued) + '</td><td>—</td></tr>' +
+          '<tr><td>Taken / booked</td><td colspan="2" style="text-align:right">' + nDays(a.taken) + ' / ' + nDays(a.booked) + (a.requested ? ' (+' + nDays(a.requested) + ' requested)' : '') + '</td></tr>' +
+          '<tr><td>Paid at the end if not taken</td><td>' + money(a.payAtEnd) + '</td><td>' + money(a.payAtEndContract) + '</td></tr>' +
+        '</table>' +
+        (warnContract ? '<div class="banner warn" style="margin:12px 0 0"><div><strong>Your contract gives less than the law</strong>' +
+          'Clause 6.1 works out at ' + dayWord(a.contract) + ' for your contract; the legal minimum (5.6 weeks a year, pro rata) is ' + dayWord(a.statutory) +
+          '. The legal minimum applies. A day\'s holiday pay is ' + money(a.dayRate) + ' (1/260 of salary).' +
+          (a.contractExcess > 0 ? ' Under the contract\'s figure, ' + dayWord(a.contractExcess) + ' you\'ve taken or booked would count as excess (' + money(a.contractClawback) + ' under clause 6.4) — the legal minimum covers ' + (a.overStatutory > 0 ? 'all but ' + dayWord(a.overStatutory) : 'all of it') + '.' : '') +
+          '</div></div>' : '') +
+        (a.overStatutory > 0 ? '<div class="banner bad" style="margin:12px 0 0"><div><strong>More than your allowance</strong>' + dayWord(a.overStatutory) +
+          ' beyond the legal minimum is taken or booked. Unless Fuse agrees extra holiday in writing, they can deduct ' + money(a.overStatutory * a.dayRate) + ' at the end.</div></div>' : '') +
+        '<p class="note">You can book what has built up so far: 1/12 of the year\'s allowance on the first day of each month you work. Figures are from your sheet' +
+        (pending ? '; ' + pending + ' change' + (pending > 1 ? 's' : '') + ' still on your phone aren\'t included yet.' : '.') + ' I\'m not a lawyer — check with Acas before relying on these.</p>';
+    }
+
+    // Bank holidays
+    const bank = (leave && leave.bankHolidays) || [];
+    const local = leaveByDay();
+    $('leaveBank').innerHTML = bank.length ? '<ul class="list">' + bank.map(b => {
+      const mine = (local[b.date] || []).find(e => e.type === 'Bank holiday');
+      const state = mine ? (mine.status === 'Approved' ? 'day off' : 'requested') : b.state;
+      const chip = state === 'day off' ? '<span class="chip ok">day off</span>' : state === 'requested' ? '<span class="chip wait">requested</span>'
+        : state === 'worked' ? '<span class="chip wait">worked</span>' : state === 'upcoming' ? '<span class="chip muted">upcoming</span>' : '<span class="chip bad">not recorded</span>';
+      const act = mine ? '' : '<button class="btn ghost small" type="button" data-bank="' + esc(b.date) + '" data-name="' + esc(b.name) + '">Day off</button>';
+      return '<li><span class="grow"><b>' + esc(dShort(b.date)) + '</b><br><span class="paymeta">' + esc(b.name) + '</span></span>' + chip + act + '</li>';
+    }).join('') + '</ul><p class="note">Your contract doesn\'t say whether bank holidays are given on top of your allowance. If you get one off with pay, mark it as a day off — by default it uses your allowance (Fuse is allowed to count it). Untick "Uses allowance" if they confirm it\'s extra.</p>'
+      : '<p class="empty">' + (leave ? 'No bank holidays fall in your contract dates.' : 'Open with signal to load bank holidays.') + '</p>';
+
+    // Entries
+    const list = leaveList();
+    $('leaveList').innerHTML = list.length ? list.map(e => {
+      const chip = e.pendingSave ? '<span class="chip wait">on phone</span>'
+        : e.status === 'Approved' ? '<span class="chip ok">approved</span>' : e.status === 'Requested' ? '<span class="chip wait">requested</span>'
+        : '<span class="chip muted">' + esc(String(e.status || '').toLowerCase()) + '</span>';
+      const span = e.from === e.to ? dShort(e.from) + (e.partFrom ? ' ' + e.partFrom + '–' + e.partTo : '') : dShort(e.from) + ' – ' + dShort(e.to);
+      const approval = e.status === 'Approved'
+        ? (e.approvedBy || e.approvedHow || e.approvedOn ? 'Approved' + (e.approvedBy ? ' by ' + e.approvedBy : '') + (e.approvedHow ? ' (' + e.approvedHow.toLowerCase() + ')' : '') + (e.approvedOn ? ' on ' + dShort(e.approvedOn) : '') : 'No approval details yet')
+        : '';
+      return '<li class="click" data-leave="' + esc(e.id) + '"><span class="grow"><b>' + esc(e.type) + '</b> · ' + esc(span) +
+        '<br><span class="paymeta">' + esc([dayWord(Number(e.days) || 0) + (e.counts ? '' : ' (not from allowance)'), approval].filter(Boolean).join(' · ')) + '</span>' +
+        (e.status === 'Approved' && !e.approvedBy && !e.approvalRef ? '<br><span class="flagline" style="margin-top:2px;font-size:13px">Add who approved it and where</span>' : '') +
+        '</span>' + chip + '</li>';
+    }).join('') : '<li class="empty">Nothing recorded yet.</li>';
+
+    $('leaveFresh').textContent = leaveErr
+      ? 'Couldn\'t update (' + leaveErr + ').' + (leave ? ' Showing the copy saved ' + hm(leave.receivedAt) + '.' : '')
+      : leave ? 'From your sheet, updated ' + hm(leave.receivedAt) + '.' : '';
+  }
+
+  function fillSelect(el, opts, value) {
+    el.innerHTML = opts.map(o => '<option' + (o === value ? ' selected' : '') + '>' + esc(o) + '</option>').join('');
+  }
+
+  function openLeaveForm(e, opts = {}) {
+    leaveEditing = { id: e.id, isNew: !!opts.isNew };
+    fillSelect($('lType'), LEAVE_TYPES, e.type || 'Holiday');
+    fillSelect($('lStatus'), LEAVE_STATUSES, e.status || 'Requested');
+    $('lHow').innerHTML = '<option value=""></option>' + LEAVE_HOW.map(o => '<option' + (o === e.approvedHow ? ' selected' : '') + '>' + o + '</option>').join('');
+    $('lFrom').value = e.from || '';
+    $('lTo').value = e.to || e.from || '';
+    $('lPart').checked = !!e.partFrom;
+    $('lPartFrom').value = e.partFrom || '';
+    $('lPartTo').value = e.partTo || '';
+    $('lDays').value = e.days != null && e.days !== '' ? String(e.days) : '';
+    $('lDays').dataset.auto = opts.isNew || e.days === '' ? '1' : '';
+    $('lCounts').checked = e.counts != null ? !!e.counts : (e.type || 'Holiday') === 'Holiday' || e.type === 'Bank holiday';
+    $('lCounts').dataset.auto = opts.isNew ? '1' : '';
+    $('lRequestedOn').value = e.requestedOn || '';
+    $('lApprovedOn').value = e.approvedOn || '';
+    $('lApprovedBy').value = e.approvedBy || '';
+    $('lRef').value = e.approvalRef || '';
+    $('lNotes').value = e.notes || '';
+    $('leaveFormTitle').textContent = opts.isNew ? 'Record leave' : 'Edit leave';
+    $('leaveDelete').classList.toggle('hidden', !!opts.isNew);
+    $('leaveFormErr').textContent = '';
+    onLeaveFormChange();
+    $('leaveForm').classList.remove('hidden');
+    $('leaveForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function closeLeaveForm() { leaveEditing = null; $('leaveForm').classList.add('hidden'); }
+
+  /** Keeps the form consistent as you type: part-day times, default days, the "uses allowance" default, hints. */
+  function onLeaveFormChange(ev) {
+    const part = $('lPart').checked;
+    document.querySelectorAll('#leaveForm .partonly').forEach(x => x.classList.toggle('hidden', !part));
+    if (part && $('lFrom').value) $('lTo').value = $('lFrom').value;
+    $('lTo').disabled = part;
+    if (ev && ev.target === $('lFrom') && (!$('lTo').value || $('lTo').value < $('lFrom').value)) $('lTo').value = $('lFrom').value;
+    if (ev && ev.target === $('lDays')) $('lDays').dataset.auto = '';
+    if (ev && ev.target === $('lCounts')) $('lCounts').dataset.auto = '';
+    const type = $('lType').value;
+    if ($('lCounts').dataset.auto) $('lCounts').checked = type === 'Holiday' || type === 'Bank holiday';
+    if ($('lDays').dataset.auto) {
+      const d = defaultDays($('lFrom').value, $('lTo').value || $('lFrom').value, part ? $('lPartFrom').value : '', part ? $('lPartTo').value : '');
+      $('lDays').value = d === '' ? '' : String(d);
+    }
+    const status = $('lStatus').value;
+    const hints = [];
+    if (type === 'Sick') hints.push('Your contract pays Statutory Sick Pay only (clause 7.2): tell them by 10am on the first day; a doctor\'s note is needed after 7 days.');
+    if (status === 'Approved' && !$('lApprovedBy').value.trim() && !$('lRef').value.trim()) hints.push('Add who approved it and where (e.g. the email subject) — clause 6.1 needs prior approval.');
+    if (status === 'Requested') hints.push('Change the status to Approved when they confirm, with the date and where.');
+    if (type === 'Bank holiday') hints.push('Untick "Uses allowance" only if Fuse confirms bank holidays are on top of your allowance.');
+    $('lHint').textContent = hints.join(' ');
+  }
+
+  function onLeaveSave() {
+    const err = $('leaveFormErr');
+    err.textContent = '';
+    if (!leaveEditing) return;
+    const part = $('lPart').checked;
+    const f = {
+      type: $('lType').value, status: $('lStatus').value,
+      from: $('lFrom').value, to: part ? $('lFrom').value : ($('lTo').value || $('lFrom').value),
+      partFrom: part ? $('lPartFrom').value : '', partTo: part ? $('lPartTo').value : '',
+      days: $('lDays').value.trim(), counts: $('lCounts').checked ? '1' : '0',
+      requestedOn: $('lRequestedOn').value, approvedOn: $('lApprovedOn').value, approvedBy: $('lApprovedBy').value.trim(),
+      approvedHow: $('lHow').value, approvalRef: $('lRef').value.trim(), notes: $('lNotes').value.trim(),
+    };
+    if (!f.from) { err.textContent = 'Choose the first day.'; return; }
+    if (f.to < f.from) { err.textContent = 'The last day is before the first day.'; return; }
+    if (part && (!f.partFrom || !f.partTo)) { err.textContent = 'Enter both times for part of a day.'; return; }
+    if (part && f.partTo <= f.partFrom) { err.textContent = 'The end time must be after the start time.'; return; }
+    if (f.days !== '' && !(Number(f.days) >= 0)) { err.textContent = 'Check the days counted.'; return; }
+    if (f.days !== '' && Number(f.days) > dRange(f.from, f.to).length) { err.textContent = 'Days counted can\'t be more than the number of dates.'; return; }
+    const c = leave && leave.contract;
+    if (c && c.start && c.end && (f.to < c.start || f.from > c.end)) { err.textContent = 'Those dates are outside your contract (' + dShort(c.start) + ' – ' + dShort(c.end) + ').'; return; }
+    if (f.status === 'Approved' || f.status === 'Requested') {
+      const clash = leaveList().find(x => x.id !== leaveEditing.id && (x.status === 'Approved' || x.status === 'Requested') && x.from <= f.to && x.to >= f.from &&
+        !(x.partFrom && f.partFrom && (x.partTo <= f.partFrom || x.partFrom >= f.partTo)));
+      if (clash) { err.textContent = 'That overlaps ' + clash.type.toLowerCase() + ' already recorded for ' + dShort(clash.from) + (clash.to !== clash.from ? ' – ' + dShort(clash.to) : '') + '.'; return; }
+    }
+    const id = leaveEditing.id;
+    queue = queue.filter(q => !(q.op === 'leave' && q.id === id));
+    closeLeaveForm();
+    $('leaveErr').className = 'okmsg';
+    $('leaveErr').textContent = syncState.kind === 'offline' ? 'Saved on your phone — it will reach your sheet when you have signal.' : 'Saved.';
+    enqueue({ op: 'leave', id, ts: Date.now(), fields: f });
+  }
+
+  function onLeaveDelete() {
+    if (!leaveEditing) return;
+    if (!confirm('Remove this? It stays in your sheet marked as deleted.')) return;
+    const id = leaveEditing.id;
+    const onlyOnPhone = !((leave && leave.entries) || []).some(e => e.id === id);
+    queue = queue.filter(q => !(q.op === 'leave' && q.id === id));
+    closeLeaveForm();
+    if (onlyOnPhone) { saveQueue(); renderAll(); } else enqueue({ op: 'leaveDelete', id, ts: Date.now() });
+  }
+
   /* ---------------- setup ---------------- */
 
   let setupOpen = false;
@@ -1167,7 +1448,7 @@
   async function onBackup() {
     const pending = queue.map(q => ({
       what: q.op === 'void' ? 'undo' : q.op === 'upload' ? 'payslip upload: ' + q.filename : q.op === 'payment' ? 'payment'
-        : q.op === 'paymentDelete' ? 'payment removal' : q.action,
+        : q.op === 'paymentDelete' ? 'payment removal' : q.op === 'leave' ? 'leave' : q.op === 'leaveDelete' ? 'leave removal' : q.action,
       time: q.ts ? new Date(q.ts).toISOString() : '', london: q.ts ? dayKey(q.ts) + ' ' + hm(q.ts) : '', fields: q.fields || undefined,
       location: q.loc || '', note: q.note || '', manual: !!q.manual, id: q.id,
     }));
@@ -1207,6 +1488,23 @@
       if (p) openPayForm(p);
     });
     $('mwCheck').addEventListener('click', onRateCheck);
+    $('leaveNew').addEventListener('click', () => { $('leaveErr').textContent = ''; openLeaveForm({ id: uuid(), from: dayKey(Date.now()) }, { isNew: true }); });
+    $('leaveCancel').addEventListener('click', closeLeaveForm);
+    $('leaveSave').addEventListener('click', onLeaveSave);
+    $('leaveDelete').addEventListener('click', onLeaveDelete);
+    ['lType', 'lStatus', 'lFrom', 'lTo', 'lPart', 'lPartFrom', 'lPartTo', 'lDays', 'lCounts', 'lApprovedBy', 'lRef']
+      .forEach(id => { $(id).addEventListener('input', onLeaveFormChange); $(id).addEventListener('change', onLeaveFormChange); });
+    $('leaveList').addEventListener('click', e => {
+      const li = e.target.closest('[data-leave]');
+      if (!li) return;
+      const x = leaveList().find(y => y.id === li.dataset.leave);
+      if (x) openLeaveForm(x);
+    });
+    $('leaveBank').addEventListener('click', e => {
+      const b = e.target.closest('[data-bank]');
+      if (!b) return;
+      openLeaveForm({ id: uuid(), type: 'Bank holiday', status: 'Approved', from: b.dataset.bank, to: b.dataset.bank, notes: b.dataset.name }, { isNew: true });
+    });
     $('setupConnect').addEventListener('click', onConnect);
     $('setupForce').addEventListener('click', onForceSave);
     $('setupCancel').addEventListener('click', () => { setupOpen = false; renderAll(); });
@@ -1245,12 +1543,13 @@
       sync();
       if (view === 'calendar') loadCalendar(false);
       if (view === 'pay') loadPayments(false);
+      if (view === 'leave') loadLeave(false);
     });
     window.addEventListener('pageshow', () => renderAll());
     // Another copy of the app (e.g. a second tab) changed storage: reload our view of it.
     window.addEventListener('storage', () => {
       queue = store.get(KEYS.queue, []); failed = store.get(KEYS.failed, []);
-      snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null); cal = store.get(KEYS.cal, null); pay = store.get(KEYS.pay, null);
+      snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null); cal = store.get(KEYS.cal, null); pay = store.get(KEYS.pay, null); leave = store.get(KEYS.leave, null);
       renderAll();
     });
 

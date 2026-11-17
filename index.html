@@ -151,7 +151,7 @@
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 9; display: grid; grid-template-columns: 1fr 1fr;
       background: color-mix(in srgb, var(--card) 92%, transparent); backdrop-filter: saturate(1.6) blur(14px);
       -webkit-backdrop-filter: saturate(1.6) blur(14px);
-      border-top: 1px solid var(--line); padding: 6px 16px calc(env(safe-area-inset-bottom) + 6px); grid-template-columns: repeat(3, 1fr);
+      border-top: 1px solid var(--line); padding: 6px 10px calc(env(safe-area-inset-bottom) + 6px); grid-template-columns: repeat(4, 1fr);
     }
     .tabs button {
       border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 600;
@@ -191,6 +191,26 @@
     .lg.work { background: color-mix(in srgb, var(--in) 50%, var(--card)); }
     .lg.flag { background: var(--out); border-radius: 50%; width: 8px; height: 8px; }
     .lg.today { box-shadow: inset 0 0 0 2px var(--accent); }
+    .cell.hol { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--accent) 22%, var(--card)) 0 5px, color-mix(in srgb, var(--accent) 10%, var(--card)) 5px 10px); }
+    .cell.sick { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--warn) 22%, var(--card)) 0 5px, color-mix(in srgb, var(--warn) 10%, var(--card)) 5px 10px); }
+    .cell.req { outline: 1.5px dashed var(--accent); outline-offset: -3px; }
+    .cell .lv { font-size: 10px; font-weight: 800; color: var(--accent); }
+    .cell.sick .lv { color: var(--warn); }
+    .wk .rest { font-size: 9px; font-weight: 800; line-height: 1.1; text-align: center; }
+    .wk.rest-bad { background: var(--out-soft); } .wk.rest-bad .rest { color: var(--out); }
+    .wk.rest-watch { background: var(--warn-soft); } .wk.rest-watch .rest { color: var(--warn); }
+    .lg.hol { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--accent) 35%, var(--card)) 0 3px, var(--card) 3px 6px); }
+    .bigfig { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .bigfig div { background: var(--soft); border-radius: 12px; padding: 10px; min-width: 0; }
+    .bigfig span { display: block; font-size: 12px; color: var(--muted); }
+    .bigfig b { font-size: 20px; font-variant-numeric: tabular-nums; }
+    .cmp { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 12px; table-layout: fixed; }
+    .cmp th, .cmp td { padding: 7px 0; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+    .cmp th:first-child, .cmp td:first-child { text-align: left; width: 46%; }
+    .cmp th { font-size: 12px; color: var(--muted); font-weight: 700; }
+    .cmp tr:last-child td { border-bottom: 0; }
+    .check { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink); margin: 4px 0 0; }
+    .check input { width: 20px; height: 20px; flex: 0 0 auto; }
     .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 4px; }
     .fact { background: var(--soft); border-radius: 12px; padding: 10px; }
     .fact span { display: block; font-size: 12px; color: var(--muted); }
@@ -342,7 +362,8 @@
         </div>
         <div class="calgrid calnames"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span><span>Wk</span></div>
         <div class="calgrid" id="calGrid"></div>
-        <div class="legend"><span><i class="lg work"></i>Worked</span><span><i class="lg flag"></i>Break / rest issue</span><span><i class="lg today"></i>Today</span></div>
+        <div class="legend"><span><i class="lg work"></i>Worked</span><span><i class="lg hol"></i>Holiday / leave</span><span><i class="lg flag"></i>Break / rest issue</span><span><i class="lg today"></i>Today</span></div>
+        <p class="note" id="restNote"></p>
       </section>
 
       <section class="card">
@@ -406,6 +427,62 @@
       </section>
       <p class="note" id="payFresh" style="text-align:center"></p>
     </div>
+
+    <div id="viewLeave" class="hidden">
+      <section class="card">
+        <h2>Holiday allowance</h2>
+        <div id="leaveAllowance"></div>
+      </section>
+
+      <section class="card">
+        <div class="calhead" style="margin-bottom:6px">
+          <h2 style="margin:0">Record leave</h2>
+          <button class="btn small" id="leaveNew" type="button">Add</button>
+        </div>
+        <p class="note" style="margin-top:0">Holiday, sickness or other leave. Record who approved it and how — that's what protects you if it's questioned later.</p>
+        <div class="err" id="leaveErr" role="status"></div>
+      </section>
+
+      <section class="card hidden" id="leaveForm">
+        <div class="calhead" style="margin-bottom:6px">
+          <h2 id="leaveFormTitle" style="margin:0">Leave</h2>
+          <button class="btn ghost small" id="leaveCancel" type="button">Close</button>
+        </div>
+        <div class="grid2">
+          <div><label for="lType">Type</label><select id="lType"></select></div>
+          <div><label for="lStatus">Status</label><select id="lStatus"></select></div>
+          <div><label for="lFrom">First day</label><input type="date" id="lFrom"></div>
+          <div><label for="lTo">Last day</label><input type="date" id="lTo"></div>
+          <div class="full"><label class="check"><input type="checkbox" id="lPart"> Only part of a day</label></div>
+          <div class="partonly hidden"><label for="lPartFrom">From</label><input type="time" id="lPartFrom" step="300"></div>
+          <div class="partonly hidden"><label for="lPartTo">To</label><input type="time" id="lPartTo" step="300"></div>
+          <div><label for="lDays">Days counted</label><input id="lDays" type="number" inputmode="decimal" min="0" step="0.25"></div>
+          <div style="display:flex;align-items:flex-end"><label class="check" style="margin-bottom:10px"><input type="checkbox" id="lCounts"> Uses allowance</label></div>
+          <div class="full sechead">Approval</div>
+          <div><label for="lRequestedOn">Requested on</label><input type="date" id="lRequestedOn"></div>
+          <div><label for="lApprovedOn">Approved on</label><input type="date" id="lApprovedOn"></div>
+          <div><label for="lApprovedBy">Approved by</label><input id="lApprovedBy" maxlength="120" placeholder="e.g. Jacob"></div>
+          <div><label for="lHow">How</label><select id="lHow"></select></div>
+          <div class="full"><label for="lRef">Where the approval is</label><input id="lRef" maxlength="500" placeholder="Email subject, Slack link or HR reference"></div>
+          <div class="full"><label for="lNotes">Notes</label><input id="lNotes" maxlength="1000"></div>
+          <div class="full"><p class="note" id="lHint" style="margin:0"></p></div>
+          <div class="full"><button class="btn" id="leaveSave" type="button" style="width:100%">Save</button></div>
+          <div class="full"><button class="btn ghost hidden" id="leaveDelete" type="button" style="width:100%;color:var(--out)">Remove</button></div>
+        </div>
+        <div class="err" id="leaveFormErr" role="status"></div>
+      </section>
+
+      <section class="card">
+        <h2>Bank holidays in your contract</h2>
+        <div id="leaveBank"></div>
+      </section>
+
+      <section class="card">
+        <h2>Your leave</h2>
+        <ul class="list" id="leaveList"></ul>
+      </section>
+      <p class="note" id="leaveFresh" style="text-align:center"></p>
+    </div>
   </main>
 </div>
 
@@ -413,6 +490,7 @@
   <button type="button" data-view="today" class="on"><span class="ico">◷</span>Today</button>
   <button type="button" data-view="calendar"><span class="ico">▦</span>Calendar</button>
   <button type="button" data-view="pay"><span class="ico">£</span>Pay</button>
+  <button type="button" data-view="leave"><span class="ico">☀</span>Holidays</button>
 </nav>
 
 <div class="toast hidden" id="toast" role="status">
