@@ -1,27 +1,48 @@
-# Hours Clock
+/*
+ * Service worker: keeps the app itself available with no signal.
+ * App files are served from the cache and refreshed in the background.
+ * Requests to Google (your sheet) are never cached — they always go to the network.
+ */
+const CACHE = 'hours-clock-v1.0.0';
+const ASSETS = [
+  './',
+  './index.html',
+  './app.js',
+  './manifest.webmanifest',
+  './icons/icon-180.png',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
+];
 
-An offline-first phone app for clocking in and out, synced to a Google Sheets hours log.
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+});
 
-Every tap is saved on the phone first, with its own ID and the time it happened, then sent to
-the sheet. With no signal it waits on the phone and is retried automatically. The sheet ignores
-repeats, so a retry can never double-count. Taps that arrive late are marked "synced late" in
-the sheet, so the record stays honest.
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
 
-This repository holds only the app's code. Your sheet's URL and access key are typed into the
-app on your phone and stored there. They are never in this repository.
+self.addEventListener('fetch', event => {
+  const req = event.request;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== self.location.origin) return; // let API calls through untouched
 
-## Files
-
-| File | Purpose |
-|---|---|
-| `index.html` | The app's layout and styles |
-| `app.js` | The app: offline queue, sync, timer, pay check |
-| `sw.js` | Service worker that keeps the app available with no signal |
-| `manifest.webmanifest`, `icons/` | Home Screen name and icon |
-
-## Updating
-
-1. Edit the files.
-2. Bump `CACHE` in `sw.js` (for example `hours-clock-v1.0.1`) so phones fetch the new version.
-3. Commit. GitHub Pages republishes in about a minute.
-4. Close and reopen the app twice: the first launch downloads the update, the second runs it.
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(req, { ignoreSearch: true }) ||
+      (req.mode === 'navigate' ? await cache.match('./index.html') : undefined);
+    const network = fetch(req)
+      .then(res => { if (res && res.ok) cache.put(req, res.clone()); return res; })
+      .catch(() => undefined);
+    if (cached) {
+      event.waitUntil(network);
+      return cached;
+    }
+    const res = await network;
+    return res || new Response('Offline and not cached yet.', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+  })());
+});
