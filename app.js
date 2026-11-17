@@ -10,9 +10,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const TZ = 'Europe/London';
-  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap' };
+  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar' };
   const UNDO_MS = 2 * 60 * 1000;        // the server allows 3 minutes; keep a margin
   const TIMEOUT_MS = 15000;
   const RETRY_MS = 15000;
@@ -231,7 +231,7 @@
         setSync(e.kind === 'network' ? 'offline' : 'error', e.message);
         return;
       }
-      if (res.ok) { applySnapshot(res); setSync('ok'); }
+      if (res.ok) { applySnapshot(res); setSync('ok'); if (view === 'calendar') loadCalendar(false); }
       else if (res.code === 'auth') setSync('auth', res.error);
       else setSync('error', res.error);
     } finally {
@@ -419,19 +419,21 @@
     renderToast(now);
   }
 
+  function tapItem(e) {
+    const label = e.action === 'IN' ? 'Clocked in' + (e.location ? ' · ' + e.location : '')
+      : e.action === 'OUT' ? 'Clocked out' : e.note;
+    const tags = [];
+    if (e.pending) tags.push('<span class="chip wait">on phone</span>');
+    if (e.source === 'manual') tags.push('<span class="chip muted">manual</span>');
+    if (e.source === 'app-offline') tags.push('<span class="chip muted">synced late</span>');
+    return '<li><span class="t num">' + hm(e.ts) + '</span><span class="grow">' + esc(label) + '</span>' + tags.join('') + '</li>';
+  }
+
   function renderTaps() {
     const m = model();
     const el = $('taps');
     if (!m.events.length) { el.innerHTML = '<li class="empty">No taps yet today.</li>'; return; }
-    el.innerHTML = m.events.slice().reverse().map(e => {
-      const label = e.action === 'IN' ? 'Clocked in' + (e.location ? ' · ' + e.location : '')
-        : e.action === 'OUT' ? 'Clocked out' : e.note;
-      const tags = [];
-      if (e.pending) tags.push('<span class="chip wait">on phone</span>');
-      if (e.source === 'manual') tags.push('<span class="chip muted">manual</span>');
-      if (e.source === 'app-offline') tags.push('<span class="chip muted">synced late</span>');
-      return '<li><span class="t num">' + hm(e.ts) + '</span><span class="grow">' + esc(label) + '</span>' + tags.join('') + '</li>';
-    }).join('');
+    el.innerHTML = m.events.slice().reverse().map(tapItem).join('');
   }
 
   function renderMonth() {
@@ -507,14 +509,208 @@
   function renderAll() {
     $('setup').classList.toggle('hidden', !!cfg && !setupOpen);
     $('main').classList.toggle('hidden', !cfg || setupOpen);
+    $('tabs').classList.toggle('hidden', !cfg || setupOpen);
+    $('viewToday').classList.toggle('hidden', view !== 'today');
+    $('viewCal').classList.toggle('hidden', view !== 'calendar');
+    document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === view));
     renderSync();
     if (!cfg) return;
+    if (view === 'calendar') renderCalendar();
     renderTick();
     renderTaps();
     renderMonth();
     renderHistory();
     renderFailed();
     renderSettings();
+  }
+
+  /* ---------------- calendar ---------------- */
+
+  let cal = store.get(KEYS.cal, null);
+  let view = prefs.view === 'calendar' ? 'calendar' : 'today';
+  let calMonth = null;   // 'yyyy-MM' being shown
+  let calSel = null;     // 'yyyy-MM-dd' selected
+  let calErr = '';
+  let calLoading = false;
+  let lastCalLoad = 0;
+
+  async function loadCalendar(force) {
+    if (!cfg || calLoading) return;
+    if (!force && Date.now() - lastCalLoad < 30000) return;
+    calLoading = true;
+    renderCalFresh();
+    try {
+      const res = await api({ api: 'calendar' });
+      if (res.ok) {
+        cal = Object.assign({}, res, { receivedAt: Date.now() });
+        store.set(KEYS.cal, cal);
+        calErr = '';
+        lastCalLoad = Date.now();
+      } else {
+        calErr = res.error || 'The sheet returned an error.';
+      }
+    } catch (e) {
+      calErr = e.message;
+    } finally {
+      calLoading = false;
+      if (view === 'calendar') renderCalendar();
+    }
+  }
+
+  function shiftMonth(mk, delta) {
+    let [y, m] = mk.split('-').map(Number);
+    m += delta;
+    while (m > 12) { m -= 12; y++; }
+    while (m < 1) { m += 12; y--; }
+    return y + '-' + two(m);
+  }
+  const monthName = mk => new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(mk + '-15T12:00:00Z'));
+  const longDate = key => new Intl.DateTimeFormat('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' }).format(new Date(key + 'T12:00:00Z'));
+  const fmtH = h => (h < 10 ? h.toFixed(1) : String(Math.round(h))) + 'h';
+
+  function calRange(todayKey) {
+    const months = (cal && cal.days ? cal.days.map(d => d.date.slice(0, 7)) : []).concat([todayKey.slice(0, 7)]);
+    months.sort();
+    return { min: months[0], max: months[months.length - 1] };
+  }
+
+  function renderCalFresh() {
+    const el = $('calFresh');
+    if (!el) return;
+    if (calLoading) { el.textContent = 'Updating calendar…'; return; }
+    const when = cal && cal.receivedAt
+      ? new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(cal.receivedAt))
+      : null;
+    el.textContent = calErr
+      ? 'Couldn\'t update (' + calErr + ').' + (when ? ' Showing the copy saved ' + when + '.' : '')
+      : when ? 'Calendar from your sheet, updated ' + when + '. Today updates live.' : 'Open with signal to load your calendar.';
+  }
+
+  function renderCalendar() {
+    const now = Date.now();
+    const m = model(now);
+    const todayKey = m.today;
+    if (!calMonth) calMonth = todayKey.slice(0, 7);
+    if (!calSel) calSel = todayKey;
+    const range = calRange(todayKey);
+    if (calMonth < range.min) calMonth = range.min;
+    if (calMonth > range.max) calMonth = range.max;
+
+    $('calTitle').textContent = monthName(calMonth);
+    $('calPrev').disabled = calMonth <= range.min;
+    $('calNext').disabled = calMonth >= range.max;
+
+    const dayMap = {};
+    (cal && cal.days ? cal.days : []).forEach(d => { dayMap[d.date] = d; });
+    const hoursFor = key => {
+      if (key === todayKey) return m.workedMs / 3600e3;
+      const d = dayMap[key];
+      return d && typeof d.hours === 'number' ? d.hours : 0;
+    };
+
+    const [y, mo] = calMonth.split('-').map(Number);
+    const firstDow = (new Date(Date.UTC(y, mo - 1, 1)).getUTCDay() + 6) % 7;
+    const dim = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    const cells = [];
+    for (let i = 0; i < firstDow; i++) cells.push(null);
+    for (let d = 1; d <= dim; d++) cells.push(calMonth + '-' + two(d));
+    while (cells.length % 7) cells.push(null);
+
+    let html = '';
+    for (let w = 0; w < cells.length; w += 7) {
+      let weekTotal = 0;
+      cells.slice(w, w + 7).forEach(key => {
+        if (!key) { html += '<span class="cell blank"></span>'; return; }
+        const d = dayMap[key];
+        const h = hoursFor(key);
+        weekTotal += h;
+        const cls = ['cell'];
+        if (!d && key !== todayKey) cls.push('out');
+        if (h > 10) cls.push('w4'); else if (h > 8) cls.push('w3'); else if (h >= 4) cls.push('w2'); else if (h > 0) cls.push('w1');
+        if (key === todayKey) cls.push('today');
+        if (key === calSel) cls.push('sel');
+        html += '<button type="button" class="' + cls.join(' ') + '" data-key="' + key + '">' +
+          (key === todayKey && m.working ? '<span class="live"></span>' : '') +
+          (d && d.flags ? '<span class="flag"></span>' : '') +
+          '<span class="d">' + Number(key.slice(8)) + '</span>' +
+          '<span class="h">' + (h >= 0.05 ? fmtH(h) : '') + '</span></button>';
+      });
+      html += '<span class="wk' + (weekTotal > 48 ? ' over' : '') + '"><b>' + (weekTotal >= 0.05 ? fmtH(weekTotal) : '–') + '</b></span>';
+    }
+    $('calGrid').innerHTML = html;
+
+    renderCalMonth(dayMap, todayKey);
+    renderDay(calSel, dayMap[calSel], calSel === todayKey, m);
+    renderCalFresh();
+  }
+
+  function renderCalMonth(dayMap, todayKey) {
+    $('calMonthTitle').textContent = monthName(calMonth);
+    const fromCal = cal && cal.months ? cal.months.find(x => x.month === calMonth) : null;
+    const mo = (snap && snap.month && snap.month.month === calMonth && snap.receivedAt > ((cal && cal.receivedAt) || 0)) ? snap.month : fromCal;
+    const days = Object.values(dayMap).filter(d => d.date.slice(0, 7) === calMonth);
+    const worked = days.filter(d => typeof d.hours === 'number' && d.hours > 0).length;
+    const flagged = days.filter(d => d.flags).length;
+    if (!mo) {
+      $('calMonth').innerHTML = days.length ? '<p class="empty">No pay figures for this month yet.</p>' : '<p class="empty">This month is outside your contract dates.</p>';
+      return;
+    }
+    const under = mo.status === 'UNDERPAID';
+    $('calMonth').innerHTML =
+      '<div class="facts">' +
+        '<div class="fact"><span>Hours</span><b>' + (mo.hours != null ? mo.hours.toFixed(1) : '—') + '</b></div>' +
+        '<div class="fact"><span>Rate</span><b>' + (mo.rate ? '£' + mo.rate.toFixed(2) : '—') + '</b></div>' +
+        '<div class="fact"><span>Days worked</span><b>' + worked + '</b></div>' +
+      '</div>' +
+      '<div class="kv"><span>Gross pay used</span><span class="num">' + (mo.pay != null ? '£' + mo.pay.toFixed(2) : '—') + '</span></div>' +
+      '<div class="kv"><span>Minimum-wage ceiling</span><span class="num">' + (mo.maxHours != null ? mo.maxHours.toFixed(1) + ' h' : '—') + '</span></div>' +
+      '<div class="kv"><span>Days with break/rest flags</span><span class="num"' + (flagged ? ' style="color:var(--out);font-weight:700"' : '') + '>' + flagged + '</span></div>' +
+      '<div class="kv"><span>Status</span><span class="chip ' + (under ? 'bad' : mo.status === 'OK' ? 'ok' : 'muted') + '">' + esc(mo.status || '—') + '</span></div>' +
+      (under && mo.shortfall ? '<div class="kv"><span>Shortfall</span><b class="num" style="color:var(--out)">£' + mo.shortfall.toFixed(2) + '</b></div>' : '') +
+      (calMonth === todayKey.slice(0, 7) ? '<p class="note">Today is added to these totals when you clock out.</p>' : '');
+  }
+
+  function renderDay(key, d, isToday, m) {
+    $('dayTitle').textContent = longDate(key) + (isToday ? ' · today' : '');
+    const el = $('dayDetail');
+    let start, finish, hrs, breakMin, loc, events;
+    if (isToday) {
+      start = m.start !== null ? hm(m.start) : '';
+      finish = m.working ? 'now' : (m.finish !== null ? hm(m.finish) : '');
+      hrs = m.workedMs / 3600e3;
+      breakMin = m.breakMs / 60000;
+      loc = m.location;
+      events = m.events;
+    } else {
+      start = d ? d.start : '';
+      finish = d ? d.finish : '';
+      hrs = d && typeof d.hours === 'number' ? d.hours : 0;
+      breakMin = d && typeof d.breakMins === 'number' ? d.breakMins : 0;
+      loc = d ? d.location : '';
+      events = (cal && cal.events && cal.events[key]) || [];
+    }
+    if (!d && !isToday) { el.innerHTML = '<p class="empty">Outside your contract dates.</p>'; return; }
+    if (!start && !events.length) { el.innerHTML = '<p class="empty">No time recorded' + (isToday ? ' yet today.' : '.') + '</p>'; return; }
+    el.innerHTML =
+      '<div class="facts">' +
+        '<div class="fact"><span>Start</span><b>' + esc(start || '—') + '</b></div>' +
+        '<div class="fact"><span>Finish</span><b>' + esc(finish || '—') + '</b></div>' +
+        '<div class="fact"><span>Hours</span><b>' + (hrs > 0 ? hours(hrs * 3600e3) : '—') + '</b></div>' +
+      '</div>' +
+      '<div class="kv"><span>Breaks</span><span class="num">' + Math.round(breakMin) + ' min</span></div>' +
+      (loc ? '<div class="kv"><span>Location</span><span>' + esc(loc) + '</span></div>' : '') +
+      (d && d.flags ? '<div class="banner bad" style="margin:12px 0 0"><div><strong>Flagged</strong>' + esc(d.flags) + '</div></div>' : '') +
+      (d && d.notes ? '<p class="note"><b>Notes:</b> ' + esc(d.notes) + '</p>' : '') +
+      (events.length ? '<ul class="list" style="margin-top:8px">' + events.map(tapItem).join('') + '</ul>' : '');
+  }
+
+  function setView(v) {
+    view = v === 'calendar' ? 'calendar' : 'today';
+    prefs.view = view;
+    store.set(KEYS.prefs, prefs);
+    renderAll();
+    window.scrollTo(0, 0);
+    if (view === 'calendar') loadCalendar(false);
   }
 
   /* ---------------- setup ---------------- */
@@ -619,6 +815,16 @@
     document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => {
       prefs.location = b.dataset.loc; store.set(KEYS.prefs, prefs); renderTick();
     }));
+    document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+    $('calPrev').addEventListener('click', () => { calMonth = shiftMonth(calMonth, -1); calSel = calMonth + '-01'; renderCalendar(); });
+    $('calNext').addEventListener('click', () => { calMonth = shiftMonth(calMonth, 1); calSel = calMonth + '-01'; renderCalendar(); });
+    $('calGrid').addEventListener('click', e => {
+      const btn = e.target.closest('[data-key]');
+      if (!btn) return;
+      calSel = btn.dataset.key;
+      renderCalendar();
+      $('dayTitle').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
     $('failed').addEventListener('click', e => {
       const i = e.target.getAttribute('data-dismiss');
       if (i === null) return;
@@ -631,16 +837,26 @@
     $('mDate').max = today;
 
     window.addEventListener('online', () => sync());
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) { renderAll(); sync(); } });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      renderAll();
+      sync();
+      if (view === 'calendar') loadCalendar(false);
+    });
     window.addEventListener('pageshow', () => renderAll());
     // Another copy of the app (e.g. a second tab) changed storage: reload our view of it.
     window.addEventListener('storage', () => {
       queue = store.get(KEYS.queue, []); failed = store.get(KEYS.failed, []);
-      snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null);
+      snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null); cal = store.get(KEYS.cal, null);
       renderAll();
     });
 
-    setInterval(() => { if (!document.hidden) renderTick(); }, 1000);
+    let ticks = 0;
+    setInterval(() => {
+      if (document.hidden) return;
+      renderTick();
+      if (view === 'calendar' && ++ticks % 30 === 0) renderCalendar();
+    }, 1000);
     setInterval(() => {
       if (!cfg || document.hidden) return;
       if (queue.length || Date.now() - lastRefresh > REFRESH_MS) sync();
@@ -655,7 +871,8 @@
   if (!cfg) openSetup();
   renderAll();
   sync();
+  if (cfg && view === 'calendar') loadCalendar(true);
 
   // Exposed for automated tests only.
-  window.__hoursClock = { computeDay, model, londonToEpoch, dayKey, get queue() { return queue; }, get failed() { return failed; }, sync };
+  window.__hoursClock = { computeDay, model, londonToEpoch, dayKey, setView, get queue() { return queue; }, get failed() { return failed; }, sync };
 })();
