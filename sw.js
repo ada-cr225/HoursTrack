@@ -3,7 +3,7 @@
  * App files are served from the cache and refreshed in the background.
  * Requests to Google (your sheet) are never cached — they always go to the network.
  */
-const CACHE = 'hours-clock-v1.5.1';
+const CACHE = 'hours-clock-v1.6.0';
 const ASSETS = [
   './',
   './index.html',

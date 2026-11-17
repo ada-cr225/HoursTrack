@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Hours">
-  <meta name="app-version" content="1.5.1">
+  <meta name="app-version" content="1.6.0">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
@@ -144,6 +144,11 @@
     ul.list li.click { cursor: pointer; }
     ul.list li.doc { display: block; }
     .docname { overflow-wrap: anywhere; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chips button { border: 1px solid var(--line); background: var(--soft); color: var(--ink); font: inherit; font-size: 14px; border-radius: 999px; padding: 5px 12px; }
+    .chips button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+    .cell .sh { position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); width: 14px; height: 3px; border-radius: 2px; background: var(--accent); }
+    .topic { font-family: ui-monospace, Menlo, monospace; font-size: 13px; background: var(--soft); padding: 8px 10px; border-radius: 8px; overflow-wrap: anywhere; }
     .docrow { display: flex; gap: 8px; align-items: center; margin-top: 8px; min-width: 0; }
     .flagline { color: var(--out); font-size: 14px; margin-top: 6px; }
     .mwbox { background: var(--soft); border-radius: 12px; padding: 12px; }
@@ -282,6 +287,25 @@
       </div>
 
       <button class="big" id="toggle" type="button">Clock in</button>
+      <p class="note" id="shiftLine" style="margin:10px 0 0;text-align:center"></p>
+    </section>
+
+    <section class="card hidden" id="stayCard">
+      <h2>Were you asked to stay late?</h2>
+      <p class="note" id="stayWhy" style="margin-top:0"></p>
+      <div class="row" id="stayAsk">
+        <button class="btn" id="stayYes" type="button" style="flex:1">Yes</button>
+        <button class="btn ghost" id="stayNo" type="button" style="flex:1">No</button>
+      </div>
+      <div class="hidden" id="stayForm">
+        <label for="stayWho">Who asked?</label>
+        <input id="stayWho" maxlength="80" placeholder="e.g. Jacob" autocomplete="off">
+        <div class="chips" id="stayChips"></div>
+        <label for="stayReason" style="margin-top:10px">What for? (optional)</label>
+        <input id="stayReason" maxlength="160" placeholder="e.g. cover the support queue">
+        <button class="btn" id="staySave" type="button" style="width:100%;margin-top:12px">Save to today's record</button>
+        <div class="err" id="stayErr"></div>
+      </div>
     </section>
 
     <section class="card">
@@ -345,6 +369,21 @@
           <div class="full" id="mw"></div>
           <div class="full"><button class="btn ghost" id="mwCheck" type="button" style="width:100%">Check GOV.UK now</button></div>
 
+          <div class="full sechead">Alerts · ntfy</div>
+          <div class="full" id="ntfyBox"><p class="note" style="margin:0">Open with signal to load.</p></div>
+
+          <div class="full sechead">Shortcuts · one-tap clocking</div>
+          <div class="full" id="scBox">
+            <p class="note" style="margin:0 0 8px">Copy a link and paste it into a Shortcut's "Get contents of URL" action. Each link contains your access key — paste it only into Shortcuts on this phone.</p>
+            <div class="grid2">
+              <button class="btn ghost small" type="button" data-sc="toggle">Clock in / out</button>
+              <button class="btn ghost small" type="button" data-sc="in">Arrive: clock in</button>
+              <button class="btn ghost small" type="button" data-sc="out">Leave: clock out</button>
+              <button class="btn ghost small" type="button" data-sc="note">Add a note</button>
+            </div>
+            <p class="note" id="scMsg" style="margin:6px 0 0"></p>
+          </div>
+
           <div class="full sechead">This phone</div>
           <div><label for="target">Daily target (hours)</label><input id="target" type="number" min="1" max="16" step="0.5" inputmode="decimal"></div>
           <div style="display:flex;align-items:flex-end"><button class="btn ghost" id="syncNow" type="button" style="width:100%">Sync now</button></div>
@@ -366,7 +405,7 @@
         </div>
         <div class="calgrid calnames"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span><span>Wk</span></div>
         <div class="calgrid" id="calGrid"></div>
-        <div class="legend"><span><i class="lg work"></i>Worked</span><span><i class="lg hol"></i>Holiday / leave</span><span><i class="lg flag"></i>Break / rest issue</span><span><i class="lg today"></i>Today</span></div>
+        <div class="legend"><span><i class="lg work"></i>Worked</span><span><i class="lg hol"></i>Holiday / leave</span><span><i class="lg" style="height:3px;background:var(--accent)"></i>Shift</span><span><i class="lg flag"></i>Break / rest issue</span><span><i class="lg today"></i>Today</span></div>
         <p class="note" id="restNote"></p>
       </section>
 
@@ -378,6 +417,34 @@
       <section class="card">
         <h2 id="dayTitle">Day</h2>
         <div id="dayDetail"></div>
+        <button class="btn ghost small" id="shiftAdd" type="button" style="margin-top:10px">Add shift as notified</button>
+      </section>
+
+      <section class="card hidden" id="shiftForm">
+        <div class="calhead" style="margin-bottom:6px">
+          <h2 id="shiftFormTitle" style="margin:0">Shift</h2>
+          <button class="btn ghost small" id="shiftCancel" type="button">Close</button>
+        </div>
+        <div class="grid2">
+          <div class="full"><label for="sDate">Date</label><input type="date" id="sDate"></div>
+          <div><label for="sStart">Start</label><input type="time" id="sStart" step="300"></div>
+          <div><label for="sEnd">End</label><input type="time" id="sEnd" step="300"></div>
+          <div class="full" id="sAlsoBox"><label>Same times on</label><div class="chips" id="sAlso"></div></div>
+          <div><label for="sStatus">Status</label><select id="sStatus"><option>Scheduled</option><option>Cancelled</option></select></div>
+          <div><label for="sHow">How you were told</label><select id="sHow"><option value=""></option><option>Rota</option><option>Email</option><option>Slack</option><option>In person</option><option>Phone</option><option>Other</option></select></div>
+          <div><label for="sBy">Told by</label><input id="sBy" maxlength="120" placeholder="e.g. Jacob"></div>
+          <div><label for="sOn">Told on</label><input type="date" id="sOn"></div>
+          <div class="full"><label for="sRef">Where (link, subject)</label><input id="sRef" maxlength="500"></div>
+          <div class="full"><label for="sNotes">Notes</label><input id="sNotes" maxlength="1000"></div>
+          <div class="full"><button class="btn" id="shiftSave" type="button" style="width:100%">Save</button></div>
+          <div class="full"><button class="btn ghost hidden" id="shiftDelete" type="button" style="width:100%;color:var(--out)">Remove</button></div>
+        </div>
+        <div class="err" id="shiftErr" role="status"></div>
+      </section>
+
+      <section class="card hidden" id="rotaCard">
+        <h2>Rota problems</h2>
+        <div id="rotaWarn"></div>
       </section>
       <p class="note" id="calFresh" style="text-align:center"></p>
     </div>
@@ -519,6 +586,6 @@
   <button type="button" id="toastUndo">Undo</button>
 </div>
 
-<script src="app.js?v=1.5.1"></script>
+<script src="app.js?v=1.6.0"></script>
 </body>
 </html>

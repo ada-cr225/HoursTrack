@@ -10,7 +10,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.5.1';
+  const VERSION = '1.6.0';
 
   // The page and the code must come from the same release. If an update arrived half-way
   // (e.g. a cached old app.js with a new index.html), throw away the app's cached files once and
@@ -29,7 +29,7 @@
     }
   }
   const TZ = 'Europe/London';
-  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments', leave: 'hc.leave', docs: 'hc.docs', docCache: 'hc.docCache' };
+  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments', leave: 'hc.leave', docs: 'hc.docs', docCache: 'hc.docCache', shifts: 'hc.shifts', stay: 'hc.stay', ntfy: 'hc.ntfy' };
   const UNDO_MS = 2 * 60 * 1000;        // the server allows 3 minutes; keep a margin
   const TIMEOUT_MS = 15000;
   const RETRY_MS = 15000;
@@ -240,6 +240,12 @@
     if (item.op === 'void') return { api: 'void', id: item.id, target: item.target, ts: String(item.ts) };
     if (item.op === 'paymentDelete') return { api: 'paymentDelete', id: item.id };
     if (item.op === 'leaveDelete') return { api: 'leaveDelete', id: item.id };
+    if (item.op === 'shiftDelete') return { api: 'shiftDelete', id: item.id };
+    if (item.op === 'shift') {
+      const p = { api: 'shiftSave', id: item.id };
+      Object.keys(item.fields).forEach(k => { if (item.fields[k] !== '' && item.fields[k] != null) p[k] = String(item.fields[k]); });
+      return p;
+    }
     if (item.op === 'leave') {
       const p = { api: 'leaveSave', id: item.id };
       Object.keys(item.fields).forEach(k => { if (item.fields[k] !== '' && item.fields[k] != null) p[k] = String(item.fields[k]); });
@@ -312,6 +318,7 @@
           applySnapshot(res);
           if (res.payments) applyPayments(res);
           if (res.allowance !== undefined && res.entries) { applyLeave(res); lastCalLoad = 0; }
+          if (res.warnings && res.shifts) { shiftsView = Object.assign({}, res, { receivedAt: Date.now() }); store.set(KEYS.shifts, shiftsView); lastCalLoad = 0; }
           if (item.op === 'upload' && item.api === 'docUpload') { await onDocUploaded(item, res); }
           else if (item.op === 'upload') { fileStore.del(item.fileKey); onUploadDone(item, res); }
           continue;
@@ -379,6 +386,7 @@
     }
 
     const item = { op: 'event', id: uuid(), action, ts: now, loc: action === 'IN' ? prefs.location : '' };
+    if (action === 'OUT') maybeAskStay(now, m.workedMs); else if (stayFor) { stayFor = null; store.set(KEYS.stay, null); }
     enqueue(item);
     lastTap = { id: item.id, ts: now, action };
     store.set(KEYS.lastTap, lastTap);
@@ -534,6 +542,8 @@
     document.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.loc === prefs.location));
 
     renderBanners(m, now);
+    renderShiftLine(m, now);
+    renderStay();
     renderToast(now);
   }
 
@@ -605,6 +615,7 @@
       const what = f.op === 'void' ? 'Undo' : f.op === 'upload' ? (f.api === 'docUpload' ? 'Document upload (' : 'Payslip upload (') + (f.filename || 'file') + ')'
         : f.op === 'payment' ? 'Payment' : f.op === 'paymentDelete' ? 'Payment removal'
         : f.op === 'leave' ? 'Leave (' + (f.fields.type || '') + ' ' + (f.fields.from || '') + ')' : f.op === 'leaveDelete' ? 'Leave removal'
+        : f.op === 'shift' ? 'Shift (' + (f.fields.date || '') + ' ' + (f.fields.start || '') + '–' + (f.fields.end || '') + ')' : f.op === 'shiftDelete' ? 'Shift removal'
         : f.action === 'IN' ? 'Clock-in' : f.action === 'OUT' ? 'Clock-out' : 'Note';
       const when = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(f.ts));
       return '<li><span class="grow"><b>' + esc(what) + ' · ' + esc(when) + '</b><br><span class="sub">' + esc(f.error) + '</span></span>' +
@@ -827,6 +838,8 @@
     while (cells.length % 7) cells.push(null);
 
     const lv = leaveByDay();
+    const sbd = shiftsByDay();
+    renderRota();
     const rest = (cal && cal.weekRest) || {};
     const restIssues = [];
     let html = '';
@@ -850,6 +863,7 @@
         html += '<button type="button" class="' + cls.join(' ') + '" data-key="' + key + '">' +
           (key === todayKey && m.working ? '<span class="live"></span>' : '') +
           (d && d.flags ? '<span class="flag"></span>' : '') +
+          ((sbd[key] || []).length ? '<span class="sh"></span>' : '') +
           '<span class="d">' + Number(key.slice(8)) + '</span>' +
           (h >= 0.05 ? '<span class="h">' + fmtH(h) + '</span>'
             : l ? '<span class="lv">' + ({ 'Holiday': 'HOL', 'Bank holiday': 'BH', 'Sick': 'SICK', 'Unpaid': 'UNP' }[l.type] || 'LV') + '</span>' : '<span class="h"></span>') +
@@ -923,9 +937,10 @@
       (e.partFrom ? ' ' + esc(e.partFrom) + '–' + esc(e.partTo) : '') + ' · ' + esc(String(e.status).toLowerCase()) + '</strong>' +
       esc(e.status === 'Approved' ? (e.approvedBy ? 'Approved by ' + e.approvedBy : 'No approver recorded') + (e.approvalRef ? ' — ' + e.approvalRef : '') : 'Waiting for approval') +
       '</div></div>').join('');
-    if (!d && !isToday && !lvs.length) { el.innerHTML = '<p class="empty">Outside your contract dates.</p>'; return; }
-    if (!start && !events.length) { el.innerHTML = lvHtml + '<p class="empty">No time recorded' + (isToday ? ' yet today.' : '.') + '</p>'; return; }
-    el.innerHTML = lvHtml +
+    const shHtml = shiftDetailHtml(key);
+    if (!d && !isToday && !lvs.length && !shHtml) { el.innerHTML = '<p class="empty">Outside your contract dates.</p>'; return; }
+    if (!start && !events.length) { el.innerHTML = lvHtml + shHtml + '<p class="empty">No time recorded' + (isToday ? ' yet today.' : '.') + '</p>'; return; }
+    el.innerHTML = lvHtml + shHtml +
       '<div class="facts">' +
         '<div class="fact"><span>Start</span><b>' + esc(start || '—') + '</b></div>' +
         '<div class="fact"><span>Finish</span><b>' + esc(finish || '—') + '</b></div>' +
@@ -944,7 +959,7 @@
     store.set(KEYS.prefs, prefs);
     renderAll();
     window.scrollTo(0, 0);
-    if (view === 'calendar') loadCalendar(false);
+    if (view === 'calendar') { loadCalendar(false); loadShifts(); }
     if (view === 'pay') loadPayments(false);
     if (view === 'leave') loadLeave(false);
     if (view === 'docs') loadDocs(true);
@@ -1561,6 +1576,220 @@
     enqueue({ op: 'upload', api: 'docUpload', id, fileKey: id, filename: file.name, mime, size: file.size, ts: Date.now() });
   }
 
+  /* ---------------- shifts as notified ---------------- */
+
+  let shiftsView = store.get(KEYS.shifts, null);  // last shifts view (warnings, comparisons)
+  let shiftEditing = null;
+  const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  async function loadShifts() {
+    if (!cfg) return;
+    try {
+      const res = await api({ api: 'shifts' });
+      if (res.ok) { shiftsView = Object.assign({}, res, { receivedAt: Date.now() }); store.set(KEYS.shifts, shiftsView); }
+    } catch (e) { /* keep the saved copy */ }
+    if (view === 'calendar') renderCalendar();
+  }
+
+  /** date -> [shift] from the calendar copy, the shifts view and anything still on the phone. */
+  function shiftsByDay() {
+    const byId = {};
+    ((shiftsView && shiftsView.shifts) || []).forEach(s => { if (s.status === 'Scheduled') byId[s.id] = s; });
+    Object.entries((cal && cal.shifts) || {}).forEach(([k, arr]) => arr.forEach(s => { if (!byId[s.id]) byId[s.id] = Object.assign({ date: k, status: 'Scheduled' }, s); }));
+    queue.forEach(q => {
+      if (q.op === 'shift') byId[q.id] = Object.assign({}, byId[q.id] || {}, q.fields, { id: q.id, pendingSave: true });
+      if (q.op === 'shiftDelete') delete byId[q.id];
+    });
+    const out = {};
+    Object.values(byId).filter(s => s.status === 'Scheduled').forEach(s => { (out[s.date] = out[s.date] || []).push(s); });
+    Object.values(out).forEach(a => a.sort((x, y) => (x.start < y.start ? -1 : 1)));
+    return out;
+  }
+
+  function shiftDetailHtml(key) {
+    const list = shiftsByDay()[key] || [];
+    if (!list.length) return '';
+    const full = id => ((shiftsView && shiftsView.shifts) || []).find(s => s.id === id) || {};
+    return '<ul class="list" style="margin:0 0 8px">' + list.map(s => {
+      const f = Object.assign({}, s, full(s.id));
+      const cmp = f.overrunMin > 0 ? ' · finished ' + f.overrunMin + ' min after the shift' : f.overrunMin < -5 ? ' · finished ' + (-f.overrunMin) + ' min early' : '';
+      const early = f.earlyMin > 5 ? ' · started ' + f.earlyMin + ' min early' : '';
+      return '<li class="click" data-shift="' + esc(s.id) + '"><span class="grow"><b>Shift ' + esc(s.start + '–' + s.end) + '</b>' +
+        '<br><span class="paymeta">' + esc((f.notifiedBy ? 'from ' + f.notifiedBy : 'who told you not recorded') + (f.how ? ' (' + f.how.toLowerCase() + ')' : '') + early + cmp) + '</span></span>' +
+        (s.pendingSave ? '<span class="chip wait">on phone</span>' : f.overrunMin > 0 ? '<span class="chip bad">+' + f.overrunMin + 'm</span>' : '<span class="chip muted">notified</span>') + '</li>';
+    }).join('') + '</ul>';
+  }
+
+  function renderRota() {
+    const w = (shiftsView && shiftsView.warnings) || [];
+    $('rotaCard').classList.toggle('hidden', !w.length);
+    $('rotaWarn').innerHTML = w.map(x => '<div class="flagline">' + esc(x.text) + '</div>').join('') +
+      (w.length ? '<p class="note">Raise these in writing before the shift if you can — a rota that breaks the rest rules is the employer\'s responsibility.</p>' : '');
+  }
+
+  function openShiftForm(s, isNew) {
+    shiftEditing = { id: s.id, isNew };
+    $('sDate').value = s.date || calSel || dayKey(Date.now());
+    $('sStart').value = s.start || ''; $('sEnd').value = s.end || '';
+    $('sStatus').value = s.status || 'Scheduled';
+    $('sHow').value = s.how || ''; $('sBy').value = s.notifiedBy || ''; $('sOn').value = s.notifiedOn || (isNew ? dayKey(Date.now()) : '');
+    $('sRef').value = s.ref || ''; $('sNotes').value = s.notes || '';
+    $('shiftFormTitle').textContent = isNew ? 'Add shift' : 'Edit shift';
+    $('shiftDelete').classList.toggle('hidden', isNew);
+    $('sAlsoBox').classList.toggle('hidden', !isNew);
+    $('sAlso').innerHTML = ''; // a new form starts with no extra days ticked
+    renderAlso();
+    $('shiftErr').textContent = '';
+    $('shiftForm').classList.remove('hidden');
+    $('shiftForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  /** "Same times on": the other days of the chosen date's week. */
+  function renderAlso() {
+    const d = $('sDate').value;
+    if (!d) { $('sAlso').innerHTML = ''; return; }
+    const monday = dAdd(d, -((dDow(d) + 6) % 7));
+    const keep = new Set([...document.querySelectorAll('#sAlso button.on')].map(b => b.dataset.k));
+    $('sAlso').innerHTML = DOW.map((n, i) => {
+      const k = dAdd(monday, i);
+      if (k === d) return '';
+      return '<button type="button" data-k="' + k + '" class="' + (keep.has(k) ? 'on' : '') + '">' + n + ' ' + Number(k.slice(8)) + '</button>';
+    }).join('');
+  }
+
+  function onShiftSave() {
+    const err = $('shiftErr'); err.textContent = '';
+    if (!shiftEditing) return;
+    const base = {
+      date: $('sDate').value, start: $('sStart').value, end: $('sEnd').value, status: $('sStatus').value,
+      how: $('sHow').value, notifiedBy: $('sBy').value.trim(), notifiedOn: $('sOn').value, ref: $('sRef').value.trim(), notes: $('sNotes').value.trim(),
+    };
+    if (!base.date) { err.textContent = 'Choose the date.'; return; }
+    if (!base.start || !base.end) { err.textContent = 'Enter the start and end times.'; return; }
+    if (base.end <= base.start) { err.textContent = 'The end time must be after the start time.'; return; }
+    const dates = [base.date].concat(shiftEditing.isNew ? [...document.querySelectorAll('#sAlso button.on')].map(b => b.dataset.k) : []);
+    const c = (leave && leave.contract) || (shiftsView && shiftsView.contract);
+    if (c && c.start && c.end) {
+      const out = dates.filter(k => k < c.start || k > c.end);
+      if (out.length) { err.textContent = 'Outside your contract: ' + out.map(dShort).join(', ') + '.'; return; }
+    }
+    if (base.status === 'Scheduled') {
+      const by = shiftsByDay();
+      const clash = dates.find(k => (by[k] || []).some(s => s.id !== shiftEditing.id && s.start < base.end && s.end > base.start));
+      if (clash) { err.textContent = 'That overlaps a shift already on ' + dShort(clash) + '.'; return; }
+    }
+    const firstId = shiftEditing.id;
+    queue = queue.filter(q => !(q.op === 'shift' && q.id === firstId));
+    $('shiftForm').classList.add('hidden');
+    shiftEditing = null;
+    dates.forEach((k, i) => {
+      const item = { op: 'shift', id: i === 0 ? firstId : uuid(), ts: Date.now(), fields: Object.assign({}, base, { date: k }) };
+      if (i < dates.length - 1) { queue.push(item); saveQueue(); } else enqueue(item);
+    });
+  }
+
+  function onShiftDelete() {
+    if (!shiftEditing) return;
+    if (!confirm('Remove this shift? It stays in your sheet marked as deleted.')) return;
+    const id = shiftEditing.id;
+    const onlyOnPhone = !((shiftsView && shiftsView.shifts) || []).some(s => s.id === id) && !Object.values((cal && cal.shifts) || {}).some(a => a.some(s => s.id === id));
+    queue = queue.filter(q => !(q.op === 'shift' && q.id === id));
+    $('shiftForm').classList.add('hidden'); shiftEditing = null;
+    if (onlyOnPhone) { saveQueue(); renderAll(); } else enqueue({ op: 'shiftDelete', id, ts: Date.now() });
+  }
+
+  function renderShiftLine(m, now) {
+    const el = $('shiftLine');
+    const sh = snap && snap.shifts;
+    const today = (shiftsByDay()[m.today] || [])[0] || (sh && sh.today && sh.today[0]);
+    let txt = '';
+    if (today) {
+      const end = londonToEpoch(m.today, today.end);
+      txt = 'Shift today ' + today.start + '–' + today.end;
+      if (m.working && now > end) txt += ' · ' + hours(now - end) + ' over';
+    } else if (sh && sh.next) {
+      txt = 'Next shift ' + dShort(sh.next.date) + ' ' + sh.next.start + '–' + sh.next.end;
+    }
+    if (el.textContent !== txt) el.textContent = txt;
+  }
+
+  /* ---------------- "who asked you to stay?" ---------------- */
+
+  let stayFor = store.get(KEYS.stay, null);   // { day, outTs } waiting for an answer
+
+  function maybeAskStay(outTs, workedMs) {
+    const p = (snap && snap.stayPrompt) || { hours: 9, after: '19:00' };
+    const t = hm(outTs);
+    if (workedMs >= p.hours * 3600e3 || t >= p.after) {
+      stayFor = { day: dayKey(outTs), outTs, workedMs };
+      store.set(KEYS.stay, stayFor);
+    }
+  }
+
+  function renderStay() {
+    const card = $('stayCard');
+    const show = !!(stayFor && stayFor.day === dayKey(Date.now()));
+    card.classList.toggle('hidden', !show);
+    if (!show) return;
+    const why = 'You clocked out at ' + hm(stayFor.outTs) + ' after ' + hours(stayFor.workedMs) + '. If someone asked you to stay, record who — it\'s the strongest evidence for unpaid hours.';
+    if ($('stayWhy').textContent !== why) $('stayWhy').textContent = why;
+    const chips = (prefs.askers || []).map(n => '<button type="button" data-name="' + esc(n) + '">' + esc(n) + '</button>').join('');
+    if ($('stayChips').dataset.html !== chips) { $('stayChips').innerHTML = chips; $('stayChips').dataset.html = chips; }
+  }
+
+  function closeStay() {
+    stayFor = null; store.set(KEYS.stay, null);
+    $('stayForm').classList.add('hidden'); $('stayAsk').classList.remove('hidden');
+    $('stayWho').value = ''; $('stayReason').value = '';
+    renderStay();
+  }
+
+  function onStaySave() {
+    const who = $('stayWho').value.trim();
+    if (!who) { $('stayErr').textContent = 'Enter who asked.'; return; }
+    const why = $('stayReason').value.trim();
+    const note = 'Asked to stay late by ' + who + (why ? ' — ' + why : '') + ' (clocked out ' + hm(stayFor.outTs) + ')';
+    prefs.askers = [who].concat((prefs.askers || []).filter(n => n.toLowerCase() !== who.toLowerCase())).slice(0, 6);
+    store.set(KEYS.prefs, prefs);
+    enqueue({ op: 'event', id: uuid(), action: 'NOTE', ts: Date.now(), note: note.slice(0, 300) });
+    closeStay();
+  }
+
+  /* ---------------- alerts (ntfy) settings ---------------- */
+
+  let ntfy = store.get(KEYS.ntfy, null);
+
+  async function loadNtfy() {
+    try {
+      const res = await api({ api: 'notifySettings' });
+      if (res.ok) { ntfy = res.notify; store.set(KEYS.ntfy, ntfy); }
+    } catch (e) { /* show the saved copy */ }
+    renderNtfy();
+  }
+
+  function renderNtfy(msg) {
+    const box = $('ntfyBox');
+    if (!ntfy) { box.innerHTML = '<p class="note" style="margin:0">Open with signal to load.</p>'; return; }
+    if (!ntfy.topic) {
+      box.innerHTML = '<p class="note" style="margin:0">Not set up yet. In your sheet: Hours Clock › Set up alerts and nightly email.</p>';
+      return;
+    }
+    box.innerHTML = '<p class="note" style="margin:0 0 6px">In the ntfy app tap <b>+</b> and subscribe to this topic' + (ntfy.server !== 'https://ntfy.sh' ? ' on ' + esc(ntfy.server) : '') + '. Keep it private — anyone with it can read your alerts.</p>' +
+      '<div class="topic" id="ntfyTopic">' + esc(ntfy.topic) + '</div>' +
+      '<div class="row" style="margin-top:8px"><button class="btn ghost small" id="ntfyCopy" type="button" style="flex:1">Copy topic</button><button class="btn ghost small" id="ntfyTest" type="button" style="flex:1">Send test alert</button></div>' +
+      '<p class="note" style="margin:6px 0 0">' + (ntfy.alertsOn ? 'Alerts on' : 'Alerts off') + ' · ' + (ntfy.emailOn ? 'nightly email on' : 'nightly email off') + (msg ? ' · ' + esc(msg) : '') + '</p>';
+  }
+
+  async function onNtfyClick(e) {
+    if (e.target.id === 'ntfyCopy') {
+      try { await navigator.clipboard.writeText(ntfy.topic); renderNtfy('topic copied'); } catch (er) { prompt('Copy this topic:', ntfy.topic); }
+    }
+    if (e.target.id === 'ntfyTest') {
+      try { const r = await api({ api: 'notifyTest' }); renderNtfy(r.ok ? 'test sent — check your phone' : r.error); }
+      catch (er) { renderNtfy('needs signal'); }
+    }
+  }
+
   /* ---------------- setup ---------------- */
 
   let setupOpen = false;
@@ -1630,7 +1859,8 @@
   async function onBackup() {
     const pending = queue.map(q => ({
       what: q.op === 'void' ? 'undo' : q.op === 'upload' ? (q.api === 'docUpload' ? 'document upload: ' : 'payslip upload: ') + q.filename : q.op === 'payment' ? 'payment'
-        : q.op === 'paymentDelete' ? 'payment removal' : q.op === 'leave' ? 'leave' : q.op === 'leaveDelete' ? 'leave removal' : q.action,
+        : q.op === 'paymentDelete' ? 'payment removal' : q.op === 'leave' ? 'leave' : q.op === 'leaveDelete' ? 'leave removal'
+        : q.op === 'shift' ? 'shift' : q.op === 'shiftDelete' ? 'shift removal' : q.action,
       time: q.ts ? new Date(q.ts).toISOString() : '', london: q.ts ? dayKey(q.ts) + ' ' + hm(q.ts) : '', fields: q.fields || undefined,
       location: q.loc || '', note: q.note || '', manual: !!q.manual, id: q.id,
     }));
@@ -1671,6 +1901,37 @@
     });
     $('mwCheck').addEventListener('click', onRateCheck);
     $('docFile').addEventListener('change', onDocChosen);
+    $('shiftAdd').addEventListener('click', () => openShiftForm({ id: uuid(), date: calSel }, true));
+    $('shiftCancel').addEventListener('click', () => { $('shiftForm').classList.add('hidden'); shiftEditing = null; });
+    $('shiftSave').addEventListener('click', onShiftSave);
+    $('shiftDelete').addEventListener('click', onShiftDelete);
+    $('sDate').addEventListener('change', renderAlso);
+    $('sAlso').addEventListener('click', e => { const b = e.target.closest('button'); if (b) b.classList.toggle('on'); });
+    $('dayDetail').addEventListener('click', e => {
+      const li = e.target.closest('[data-shift]'); if (!li) return;
+      const all = Object.values(shiftsByDay()).flat();
+      const s = all.find(x => x.id === li.dataset.shift);
+      const full = ((shiftsView && shiftsView.shifts) || []).find(x => x.id === li.dataset.shift);
+      if (s) openShiftForm(Object.assign({}, s, full || {}), false);
+    });
+    $('stayYes').addEventListener('click', () => { $('stayAsk').classList.add('hidden'); $('stayForm').classList.remove('hidden'); $('stayWho').focus(); });
+    $('stayNo').addEventListener('click', closeStay);
+    $('staySave').addEventListener('click', onStaySave);
+    $('stayChips').addEventListener('click', e => { const b = e.target.closest('[data-name]'); if (b) $('stayWho').value = b.dataset.name; });
+    $('ntfyBox').addEventListener('click', onNtfyClick);
+    $('scBox').addEventListener('click', async e => {
+      const b = e.target.closest('[data-sc]'); if (!b || !cfg) return;
+      const base = cfg.url + '?k=' + encodeURIComponent(cfg.key) + '&source=shortcut';
+      const link = {
+        toggle: base + '&api=toggle&loc=' + encodeURIComponent(prefs.location || 'Office'),
+        in: base + '&api=toggle&want=IN&loc=Office',
+        out: base + '&api=toggle&want=OUT',
+        note: base + '&api=note&text=',
+      }[b.dataset.sc];
+      try { await navigator.clipboard.writeText(link); $('scMsg').textContent = 'Copied. Paste it into the Shortcut (see the steps you were sent).'; }
+      catch (er) { prompt('Copy this link:', link); }
+    });
+    document.querySelectorAll('details').forEach(dt => dt.addEventListener('toggle', () => { if (dt.open && dt.querySelector('#ntfyBox')) loadNtfy(); }));
     $('leaveAllowance').addEventListener('click', e => {
       if (!e.target.closest('[data-opencontract]')) return;
       e.preventDefault();
@@ -1745,6 +2006,7 @@
       queue = store.get(KEYS.queue, []); failed = store.get(KEYS.failed, []);
       snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null); cal = store.get(KEYS.cal, null); pay = store.get(KEYS.pay, null); leave = store.get(KEYS.leave, null);
       docs = store.get(KEYS.docs, null); docCache = store.get(KEYS.docCache, {});
+      shiftsView = store.get(KEYS.shifts, null); stayFor = store.get(KEYS.stay, null);
       renderAll();
     });
 
@@ -1779,7 +2041,7 @@
   if (!cfg) openSetup();
   renderAll();
   sync();
-  if (cfg && view === 'calendar') loadCalendar(true);
+  if (cfg && view === 'calendar') { loadCalendar(true); loadShifts(); }
   if (cfg && view === 'pay') loadPayments(true);
 
   // Exposed for automated tests only.
