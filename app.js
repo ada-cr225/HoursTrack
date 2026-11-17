@@ -10,7 +10,24 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.5.0';
+  const VERSION = '1.5.1';
+
+  // The page and the code must come from the same release. If an update arrived half-way
+  // (e.g. a cached old app.js with a new index.html), throw away the app's cached files once and
+  // reload. Your taps and settings live in separate storage and are not touched.
+  const PAGE_VERSION = (document.querySelector('meta[name="app-version"]') || {}).content;
+  if (PAGE_VERSION && PAGE_VERSION !== VERSION) {
+    let healed = false;
+    try { healed = sessionStorage.getItem('hc.healed') === PAGE_VERSION + '|' + VERSION; sessionStorage.setItem('hc.healed', PAGE_VERSION + '|' + VERSION); } catch (e) { /* ignore */ }
+    if (!healed) {
+      Promise.resolve()
+        .then(() => navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then(rs => Promise.all(rs.map(r => r.unregister()))) : null)
+        .then(() => window.caches ? caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith('hours-clock-')).map(k => caches.delete(k)))) : null)
+        .catch(() => {})
+        .then(() => location.reload());
+      return;
+    }
+  }
   const TZ = 'Europe/London';
   const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments', leave: 'hc.leave', docs: 'hc.docs', docCache: 'hc.docCache' };
   const UNDO_MS = 2 * 60 * 1000;        // the server allows 3 minutes; keep a margin
@@ -440,6 +457,9 @@
 
   function renderBanners(m, now) {
     const out = [];
+    if (PAGE_VERSION && PAGE_VERSION !== VERSION) {
+      out.push(['warn', 'Update didn\'t finish', 'The page is version ' + PAGE_VERSION + ' but the code is ' + VERSION + '. Close the app completely and open it again. Your taps are safe.']);
+    }
     if (storageBroken) {
       out.push(['bad', 'This phone isn\'t letting the app save data', 'Taps can\'t be kept if you lose signal. Turn off Private Browsing and open the app from your Home Screen.']);
     }
@@ -1741,7 +1761,18 @@
   }
 
   if ('serviceWorker' in navigator) {
+    const hadController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.register('sw.js').catch(() => {});
+    // A new release took over: reload into it — straight away unless you're filling in a form.
+    let reloading = false;
+    const reloadSoon = () => {
+      if (reloading) return;
+      const busy = (typeof editing !== 'undefined' && editing) || (typeof leaveEditing !== 'undefined' && leaveEditing);
+      if (busy && !document.hidden) { document.addEventListener('visibilitychange', reloadSoon, { once: true }); return; }
+      reloading = true;
+      location.reload();
+    };
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) reloadSoon(); });
   }
 
   wire();

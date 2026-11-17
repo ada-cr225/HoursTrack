@@ -3,7 +3,7 @@
  * App files are served from the cache and refreshed in the background.
  * Requests to Google (your sheet) are never cached — they always go to the network.
  */
-const CACHE = 'hours-clock-v1.5.0';
+const CACHE = 'hours-clock-v1.5.1';
 const ASSETS = [
   './',
   './index.html',
@@ -14,8 +14,14 @@ const ASSETS = [
   './icons/icon-512.png',
 ];
 
+// Every file of a release is fetched fresh from the server (never from the browser's HTTP cache),
+// so the page and the code always match.
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE).then(c => Promise.all(ASSETS.map(u =>
+    fetch(u, { cache: 'reload' }).then(res => {
+      if (!res.ok) throw new Error(u + ' ' + res.status);
+      return c.put(u, res);
+    })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', event => {
@@ -35,7 +41,7 @@ self.addEventListener('fetch', event => {
     const cache = await caches.open(CACHE);
     const cached = await cache.match(req, { ignoreSearch: true }) ||
       (req.mode === 'navigate' ? await cache.match('./index.html') : undefined);
-    const network = fetch(req)
+    const network = fetch(req.url, { cache: 'no-cache' })
       .then(res => { if (res && res.ok) cache.put(req, res.clone()); return res; })
       .catch(() => undefined);
     if (cached) {
