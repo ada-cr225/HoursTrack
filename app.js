@@ -1220,27 +1220,27 @@
     if (!a) {
       el.innerHTML = '<p class="empty">Open with signal to load your allowance.</p>';
     } else {
-      const warnContract = a.contract < a.statutory;
+      const higher = a.basis === 'contract' ? 'contract' : 'legal minimum';
       el.innerHTML =
         '<div class="bigfig">' +
           '<div><span>Can book now</span><b>' + nDays(a.availableNow) + '</b></div>' +
           '<div><span>Left in contract</span><b' + (a.remaining < 0 ? ' style="color:var(--out)"' : '') + '>' + nDays(a.remaining) + '</b></div>' +
           '<div><span>Taken</span><b>' + nDays(a.taken) + '</b></div>' +
         '</div>' +
-        '<table class="cmp"><tr><th></th><th>Legal minimum</th><th>Contract</th></tr>' +
-          '<tr><td>Allowance for your contract</td><td>' + dayWord(a.statutory) + '</td><td>' + dayWord(a.contract) + '</td></tr>' +
-          '<tr><td>Built up so far</td><td>' + dayWord(a.accrued) + '</td><td>—</td></tr>' +
+        '<table class="cmp"><tr><th></th><th>Contract</th><th>Legal minimum</th></tr>' +
+          '<tr><td>Allowance for your contract</td><td' + (a.basis === 'contract' ? ' style="font-weight:800"' : '') + '>' + dayWord(a.contract) + '</td><td' + (a.basis !== 'contract' ? ' style="font-weight:800"' : '') + '>' + dayWord(a.statutory) + '</td></tr>' +
+          '<tr><td>Built up so far</td><td>' + dayWord(a.accruedContract) + '</td><td>' + dayWord(a.accruedStatutory) + '</td></tr>' +
           '<tr><td>Taken / booked</td><td colspan="2" style="text-align:right">' + nDays(a.taken) + ' / ' + nDays(a.booked) + (a.requested ? ' (+' + nDays(a.requested) + ' requested)' : '') + '</td></tr>' +
-          '<tr><td>Paid at the end if not taken</td><td>' + money(a.payAtEnd) + '</td><td>' + money(a.payAtEndContract) + '</td></tr>' +
+          '<tr><td>Paid at the end if not taken</td><td colspan="2" style="text-align:right">' + money(a.payAtEnd) + '</td></tr>' +
         '</table>' +
-        (warnContract ? '<div class="banner warn" style="margin:12px 0 0"><div><strong>Your contract gives less than the law</strong>' +
-          'Clause 6.1 works out at ' + dayWord(a.contract) + ' for your contract; the legal minimum (5.6 weeks a year, pro rata) is ' + dayWord(a.statutory) +
-          '. The legal minimum applies. A day\'s holiday pay is ' + money(a.dayRate) + ' (1/260 of salary).' +
-          (a.contractExcess > 0 ? ' Under the contract\'s figure, ' + dayWord(a.contractExcess) + ' you\'ve taken or booked would count as excess (' + money(a.contractClawback) + ' under clause 6.4) — the legal minimum covers ' + (a.overStatutory > 0 ? 'all but ' + dayWord(a.overStatutory) : 'all of it') + '.' : '') +
-          '</div></div>' : '') +
-        (a.overStatutory > 0 ? '<div class="banner bad" style="margin:12px 0 0"><div><strong>More than your allowance</strong>' + dayWord(a.overStatutory) +
-          ' beyond the legal minimum is taken or booked. Unless Fuse agrees extra holiday in writing, they can deduct ' + money(a.overStatutory * a.dayRate) + ' at the end.</div></div>' : '') +
-        '<p class="note">You can book what has built up so far: 1/12 of the year\'s allowance on the first day of each month you work. Figures are from your sheet' +
+        '<p class="note">You get the higher of the two — here the ' + higher + ' (' + dayWord(a.entitlement) + '). ' +
+          (a.contractBasis === 'contract' ? 'Contract figure: 8 days for the whole contract, as Fuse told you (clause 6.1). ' : 'Contract figure: 8 days a year, pro rata (clause 6.1). ') +
+          'A day\'s holiday pay is ' + money(a.dayRate) + ' (1/260 of salary, clause 6.2).</p>' +
+        (a.basis !== 'contract' ? '<div class="banner warn" style="margin:12px 0 0"><div><strong>Your contract gives less than the law</strong>' +
+          'The legal minimum (5.6 weeks a year, pro rata) applies instead: ' + dayWord(a.statutory) + '.</div></div>' : '') +
+        (a.overEntitlement > 0 ? '<div class="banner bad" style="margin:12px 0 0"><div><strong>More than your allowance</strong>' + dayWord(a.overEntitlement) +
+          ' beyond your ' + dayWord(a.entitlement) + ' is taken or booked. Unless Fuse agrees extra holiday in writing, clause 6.4 lets them deduct ' + money(a.clawback) + ' at the end.</div></div>' : '') +
+        '<p class="note">"Can book now" is what has built up so far (the higher of the two ways it builds up). Figures are from your sheet' +
         (pending ? '; ' + pending + ' change' + (pending > 1 ? 's' : '') + ' still on your phone aren\'t included yet.' : '.') + ' I\'m not a lawyer — check with Acas before relying on these.</p>';
     }
 
