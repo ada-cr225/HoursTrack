@@ -10,7 +10,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.6.1';
+  const VERSION = '1.6.2';
 
   // The page and the code must come from the same release. If an update arrived half-way
   // (e.g. a cached old app.js with a new index.html), throw away the app's cached files once and
@@ -1786,8 +1786,8 @@
     }
     if (e.target.id === 'ntfyTest') {
       busyBtn(e.target, 'Sending…');
-      try { const r = await api({ api: 'notifyTest' }); renderNtfy(r.ok ? 'test sent — check your phone' : r.error); if (r.ok) confirmBtn($('ntfyTest'), 'Sent ✓'); }
-      catch (er) { renderNtfy('needs signal'); }
+      try { const r = await api({ api: 'notifyTest' }); renderNtfy(r.ok ? 'test sent — check your phone' : 'couldn\'t send: ' + r.error); if (r.ok) confirmBtn($('ntfyTest'), 'Sent ✓'); else restoreBtn($('ntfyTest')); }
+      catch (er) { restoreBtn($('ntfyTest')); renderNtfy('couldn\'t send: ' + er.message); }
     }
   }
 
