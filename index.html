@@ -141,6 +141,9 @@
     .paymeta { font-size: 13px; color: var(--muted); }
     .payamt { font-weight: 700; font-variant-numeric: tabular-nums; }
     ul.list li.click { cursor: pointer; }
+    ul.list li.doc { display: block; }
+    .docname { overflow-wrap: anywhere; }
+    .docrow { display: flex; gap: 8px; align-items: center; margin-top: 8px; min-width: 0; }
     .flagline { color: var(--out); font-size: 14px; margin-top: 6px; }
     .mwbox { background: var(--soft); border-radius: 12px; padding: 12px; }
     .mwbox .big-rate { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
@@ -151,7 +154,7 @@
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 9; display: grid; grid-template-columns: 1fr 1fr;
       background: color-mix(in srgb, var(--card) 92%, transparent); backdrop-filter: saturate(1.6) blur(14px);
       -webkit-backdrop-filter: saturate(1.6) blur(14px);
-      border-top: 1px solid var(--line); padding: 6px 10px calc(env(safe-area-inset-bottom) + 6px); grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid var(--line); padding: 6px 6px calc(env(safe-area-inset-bottom) + 6px); grid-template-columns: repeat(5, 1fr);
     }
     .tabs button {
       border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 600;
@@ -483,6 +486,22 @@
       </section>
       <p class="note" id="leaveFresh" style="text-align:center"></p>
     </div>
+
+    <div id="viewDocs" class="hidden">
+      <section class="card">
+        <h2>Documents</h2>
+        <div class="row">
+          <label class="btn" for="docFile" style="flex:1;text-align:center;cursor:pointer">Add a document</label>
+          <input type="file" id="docFile" accept="application/pdf,image/*,.pdf,.doc,.docx,.txt" style="display:none">
+        </div>
+        <p class="note">Saved to the Contracts &amp; Agreements folder next to your hours sheet. Everything in that folder shows here — including files you put there from your computer — and a copy is kept on this phone so it opens with no signal.</p>
+        <div class="err" id="docErr" role="status"></div>
+      </section>
+      <section class="card">
+        <ul class="list" id="docList"></ul>
+      </section>
+      <p class="note" id="docFresh" style="text-align:center"></p>
+    </div>
   </main>
 </div>
 
@@ -491,6 +510,7 @@
   <button type="button" data-view="calendar"><span class="ico">▦</span>Calendar</button>
   <button type="button" data-view="pay"><span class="ico">£</span>Pay</button>
   <button type="button" data-view="leave"><span class="ico">☀</span>Holidays</button>
+  <button type="button" data-view="docs"><span class="ico">▤</span>Docs</button>
 </nav>
 
 <div class="toast hidden" id="toast" role="status">

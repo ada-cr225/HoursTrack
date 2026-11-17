@@ -10,9 +10,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const TZ = 'Europe/London';
-  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments', leave: 'hc.leave' };
+  const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar', pay: 'hc.payments', leave: 'hc.leave', docs: 'hc.docs', docCache: 'hc.docCache' };
   const UNDO_MS = 2 * 60 * 1000;        // the server allows 3 minutes; keep a margin
   const TIMEOUT_MS = 15000;
   const RETRY_MS = 15000;
@@ -278,7 +278,7 @@
             if (!blob) {
               res = { ok: false, code: 'rejected', error: 'The file is no longer on this phone. Upload it again.' };
             } else {
-              res = await apiPost({ api: 'upload', id: item.id, filename: item.filename, mimeType: item.mime, data: await blobToBase64(blob) });
+              res = await apiPost({ api: item.api || 'upload', id: item.id, filename: item.filename, mimeType: item.mime, data: await blobToBase64(blob) });
             }
           } else {
             res = await api(paramsFor(item));
@@ -295,7 +295,8 @@
           applySnapshot(res);
           if (res.payments) applyPayments(res);
           if (res.allowance !== undefined && res.entries) { applyLeave(res); lastCalLoad = 0; }
-          if (item.op === 'upload') { fileStore.del(item.fileKey); onUploadDone(item, res); }
+          if (item.op === 'upload' && item.api === 'docUpload') { await onDocUploaded(item, res); }
+          else if (item.op === 'upload') { fileStore.del(item.fileKey); onUploadDone(item, res); }
           continue;
         }
         if (res.code === 'auth') { setSync('auth', res.error); return; }
@@ -321,6 +322,7 @@
         if (view === 'calendar') loadCalendar(false);
         if (view === 'pay') loadPayments(false);
         if (view === 'leave') loadLeave(false);
+        if (view === 'docs' || Date.now() - lastDocsLoad > 6 * 3600e3) loadDocs(false); // keeps offline copies fresh
       }
       else if (res.code === 'auth') setSync('auth', res.error);
       else setSync('error', res.error);
@@ -580,7 +582,7 @@
     card.classList.toggle('hidden', !failed.length);
     if (!failed.length) return;
     $('failed').innerHTML = failed.map((f, i) => {
-      const what = f.op === 'void' ? 'Undo' : f.op === 'upload' ? 'Payslip upload (' + (f.filename || 'file') + ')'
+      const what = f.op === 'void' ? 'Undo' : f.op === 'upload' ? (f.api === 'docUpload' ? 'Document upload (' : 'Payslip upload (') + (f.filename || 'file') + ')'
         : f.op === 'payment' ? 'Payment' : f.op === 'paymentDelete' ? 'Payment removal'
         : f.op === 'leave' ? 'Leave (' + (f.fields.type || '') + ' ' + (f.fields.from || '') + ')' : f.op === 'leaveDelete' ? 'Leave removal'
         : f.action === 'IN' ? 'Clock-in' : f.action === 'OUT' ? 'Clock-out' : 'Note';
@@ -695,12 +697,14 @@
     $('viewCal').classList.toggle('hidden', view !== 'calendar');
     $('viewPay').classList.toggle('hidden', view !== 'pay');
     $('viewLeave').classList.toggle('hidden', view !== 'leave');
+    $('viewDocs').classList.toggle('hidden', view !== 'docs');
     document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.view === view));
     renderSync();
     if (!cfg) return;
     if (view === 'calendar') renderCalendar();
     if (view === 'pay') renderPay();
     if (view === 'leave') renderLeave();
+    if (view === 'docs') renderDocs();
     renderTick();
     renderTaps();
     renderMonth();
@@ -712,7 +716,7 @@
   /* ---------------- calendar ---------------- */
 
   let cal = store.get(KEYS.cal, null);
-  const VIEWS = ['today', 'calendar', 'pay', 'leave'];
+  const VIEWS = ['today', 'calendar', 'pay', 'leave', 'docs'];
   let view = VIEWS.indexOf(prefs.view) >= 0 ? prefs.view : 'today';
   let calMonth = null;   // 'yyyy-MM' being shown
   let calSel = null;     // 'yyyy-MM-dd' selected
@@ -923,6 +927,7 @@
     if (view === 'calendar') loadCalendar(false);
     if (view === 'pay') loadPayments(false);
     if (view === 'leave') loadLeave(false);
+    if (view === 'docs') loadDocs(true);
   }
 
   /* ---------------- payments ---------------- */
@@ -967,7 +972,7 @@
         });
       }
       if (q.op === 'paymentDelete') delete byId[q.id];
-      if (q.op === 'upload' && !byId[q.id]) {
+      if (q.op === 'upload' && q.api !== 'docUpload' && !byId[q.id]) {
         byId[q.id] = { id: q.id, uploading: true, filename: q.filename, received: dayKey(q.ts), status: 'Waiting to upload' };
       }
     });
@@ -976,7 +981,7 @@
 
   function renderPay() {
     const list = payList();
-    const waitingUploads = queue.filter(q => q.op === 'upload').length;
+    const waitingUploads = queue.filter(q => q.op === 'upload' && q.api !== 'docUpload').length;
     if (waitingUploads && (syncState.kind === 'offline' || syncState.kind === 'error' || syncState.kind === 'auth')) {
       $('payErr').className = 'okmsg';
       $('payErr').textContent = waitingUploads + ' payslip' + (waitingUploads > 1 ? 's' : '') +
@@ -1235,7 +1240,8 @@
         '</table>' +
         '<p class="note">You get the higher of the two — here the ' + higher + ' (' + dayWord(a.entitlement) + '). ' +
           (a.contractBasis === 'contract' ? 'Contract figure: 8 days for the whole contract, as Fuse told you (clause 6.1). ' : 'Contract figure: 8 days a year, pro rata (clause 6.1). ') +
-          'A day\'s holiday pay is ' + money(a.dayRate) + ' (1/260 of salary, clause 6.2).</p>' +
+          'A day\'s holiday pay is ' + money(a.dayRate) + ' (1/260 of salary, clause 6.2).' +
+          (contractDoc() ? ' <a href="#" data-opencontract="1">Open your contract</a>' : '') + '</p>' +
         (a.basis !== 'contract' ? '<div class="banner warn" style="margin:12px 0 0"><div><strong>Your contract gives less than the law</strong>' +
           'The legal minimum (5.6 weeks a year, pro rata) applies instead: ' + dayWord(a.statutory) + '.</div></div>' : '') +
         (a.overEntitlement > 0 ? '<div class="banner bad" style="margin:12px 0 0"><div><strong>More than your allowance</strong>' + dayWord(a.overEntitlement) +
@@ -1379,6 +1385,162 @@
     if (onlyOnPhone) { saveQueue(); renderAll(); } else enqueue({ op: 'leaveDelete', id, ts: Date.now() });
   }
 
+  /* ---------------- documents ---------------- */
+
+  let docs = store.get(KEYS.docs, null);          // last list from the sheet's folder
+  let docCache = store.get(KEYS.docCache, {});    // driveId -> { updated, name, mime, size } kept on this phone
+  let docsLoading = false, docsErr = '', lastDocsLoad = 0, caching = false, cachingId = null;
+  const DOC_MIME = /^(application\/pdf|image\/(jpeg|png|heic|heif|webp)|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|application\/msword|text\/plain)$/;
+  const saveDocCache = () => store.set(KEYS.docCache, docCache);
+  const kb = n => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
+  const docDate = ms => new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(ms));
+
+  function applyDocs(res) {
+    docs = { docs: res.docs, folder: res.folder, receivedAt: Date.now() };
+    store.set(KEYS.docs, docs);
+    lastDocsLoad = Date.now();
+  }
+
+  async function loadDocs(force) {
+    if (!cfg || docsLoading) return;
+    if (!force && Date.now() - lastDocsLoad < 30000) return;
+    docsLoading = true;
+    try {
+      const res = await api({ api: 'docs' });
+      if (res.ok) { applyDocs(res); docsErr = ''; } else docsErr = res.error;
+    } catch (e) { docsErr = e.message; }
+    finally { docsLoading = false; if (view === 'docs') renderDocs(); }
+    cacheDocs();
+  }
+
+  /** Keeps a copy of every document on the phone, so they open with no signal. Newer versions replace older ones. */
+  async function cacheDocs() {
+    if (caching || !docs || !docs.docs) return;
+    caching = true;
+    try {
+      const ids = new Set(docs.docs.map(d => d.id));
+      for (const id of Object.keys(docCache)) {
+        if (!ids.has(id)) { await fileStore.del('doc:' + id); delete docCache[id]; saveDocCache(); }
+      }
+      for (const d of docs.docs) {
+        if (!d.offline || (docCache[d.id] && docCache[d.id].updated === d.updated)) continue;
+        cachingId = d.id;
+        if (view === 'docs') renderDocs();
+        let res;
+        try { res = await api({ api: 'docFile', id: d.id }); } catch (e) { break; } // no signal: try again later
+        if (!res.ok) continue;
+        const bytes = Uint8Array.from(atob(res.data), c => c.charCodeAt(0));
+        try {
+          await fileStore.put('doc:' + d.id, new Blob([bytes], { type: res.mime }));
+        } catch (e) { break; } // phone storage full
+        docCache[d.id] = { updated: res.updated, name: res.name, mime: res.mime, size: bytes.length };
+        saveDocCache();
+      }
+    } finally {
+      caching = false; cachingId = null;
+      if (view === 'docs') renderDocs();
+    }
+  }
+
+  /** After an upload, the copy already on the phone becomes the offline copy — no need to download it again. */
+  async function onDocUploaded(item, res) {
+    applyDocs(res);
+    const d = res.focus && res.docs.find(x => x.id === res.focus);
+    try {
+      const blob = await fileStore.get(item.fileKey);
+      if (d && blob) {
+        await fileStore.put('doc:' + d.id, blob);
+        docCache[d.id] = { updated: d.updated, name: d.name, mime: d.mime, size: blob.size };
+        saveDocCache();
+      }
+    } catch (e) { /* it will be downloaded instead */ }
+    fileStore.del(item.fileKey);
+    if (view === 'docs') {
+      $('docErr').className = 'okmsg';
+      $('docErr').textContent = 'Saved to ' + ((res.folder && res.folder.name) || 'your Drive') + ' and kept on this phone.';
+    }
+  }
+
+  function renderDocs() {
+    const waiting = queue.filter(q => q.op === 'upload' && q.api === 'docUpload');
+    const list = (docs && docs.docs) || [];
+    const rows = waiting.map(q => '<li><span class="grow"><b>' + esc(q.filename) + '</b><br><span class="paymeta">' +
+        (syncState.kind === 'syncing' ? 'Uploading…' : 'Will upload when you have signal') + '</span></span><span class="chip wait">on phone</span></li>')
+      .concat(list.map(d => {
+        const local = docCache[d.id] && docCache[d.id].updated === d.updated;
+        const chip = local ? '<span class="chip ok">on phone</span>' : cachingId === d.id ? '<span class="chip wait">saving…</span>'
+          : d.offline ? '<span class="chip muted">not saved yet</span>' : '<span class="chip muted">Drive only</span>';
+        const isContract = /contract|agreement|docusign/i.test(d.name);
+        return '<li class="doc"><div class="docname"><b>' + esc(d.name) + '</b>' + (isContract ? ' <span class="chip ok">contract</span>' : '') + '</div>' +
+          '<div class="docrow"><span class="paymeta grow">' + esc(docDate(d.created) + ' · ' + kb(d.size)) + ' · <a href="' + esc(d.url) + '" target="_blank" rel="noopener">Drive</a></span>' + chip + '</div>' +
+          '<div class="docrow"><button class="btn small" type="button" data-open="' + esc(d.id) + '" style="flex:1">Open</button>' +
+          (local ? '<button class="btn ghost small" type="button" data-share="' + esc(d.id) + '" style="flex:1">Save / share</button>' : '') + '</div></li>';
+      }));
+    $('docList').innerHTML = rows.length ? rows.join('') : '<li class="empty">' + (docs ? 'No documents yet. Add your contract above.' : 'Open with signal to load your documents.') + '</li>';
+    $('docFresh').textContent = docsErr
+      ? 'Couldn\'t update (' + docsErr + ').' + (docs ? ' Showing the list saved ' + hm(docs.receivedAt) + '.' : '')
+      : docs ? 'From ' + ((docs.folder && docs.folder.name) || 'your folder') + ', updated ' + hm(docs.receivedAt) + '.' : '';
+  }
+
+  const contractDoc = () => ((docs && docs.docs) || []).find(d => /contract|docusign/i.test(d.name)) || null;
+
+  async function localDoc(id) {
+    const c = docCache[id];
+    if (!c) return null;
+    try {
+      const blob = await fileStore.get('doc:' + id);
+      return blob ? new File([blob], c.name, { type: c.mime || blob.type }) : null;
+    } catch (e) { return null; }
+  }
+
+  /** Opens the phone's copy (works offline); falls back to Drive. */
+  async function openDoc(id) {
+    const d = ((docs && docs.docs) || []).find(x => x.id === id);
+    // Open the window first, inside the tap, so iOS doesn't block it as a pop-up.
+    const win = window.open('', '_blank');
+    const file = await localDoc(id);
+    if (file) {
+      const url = URL.createObjectURL(file);
+      if (win) win.location.href = url; else location.href = url;
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return;
+    }
+    if (d && navigator.onLine !== false) { if (win) win.location.href = d.url; else location.href = d.url; return; }
+    if (win) win.close();
+    $('docErr').className = 'err';
+    $('docErr').textContent = 'That document isn\'t saved on this phone yet. Open the app once with signal and it will be.';
+  }
+
+  /** Share sheet: Save to Files, AirDrop, Mail… (works offline). */
+  async function shareDoc(id) {
+    const file = await localDoc(id);
+    if (!file) return;
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: file.name }); } catch (e) { /* cancelled */ }
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(file); a.download = file.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    }
+  }
+
+  async function onDocChosen(e) {
+    const msg = $('docErr');
+    msg.className = 'err'; msg.textContent = '';
+    const input = e.target;
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    const mime = file.type || (/\.docx$/i.test(file.name) ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : /\.pdf$/i.test(file.name) ? 'application/pdf' : '');
+    if (!DOC_MIME.test(mime)) { msg.textContent = 'Add a PDF, a photo or a Word document.'; return; }
+    if (file.size > MAX_UPLOAD) { msg.textContent = 'That file is larger than 15 MB.'; return; }
+    const id = uuid();
+    try { await fileStore.put(id, file); } catch (e2) { msg.textContent = 'This phone wouldn\'t store the file (' + e2.message + '). Try again.'; return; }
+    msg.className = 'okmsg';
+    msg.textContent = syncState.kind === 'offline' ? 'Saved on your phone — it will upload when you have signal.' : 'Uploading…';
+    enqueue({ op: 'upload', api: 'docUpload', id, fileKey: id, filename: file.name, mime, size: file.size, ts: Date.now() });
+  }
+
   /* ---------------- setup ---------------- */
 
   let setupOpen = false;
@@ -1447,7 +1609,7 @@
 
   async function onBackup() {
     const pending = queue.map(q => ({
-      what: q.op === 'void' ? 'undo' : q.op === 'upload' ? 'payslip upload: ' + q.filename : q.op === 'payment' ? 'payment'
+      what: q.op === 'void' ? 'undo' : q.op === 'upload' ? (q.api === 'docUpload' ? 'document upload: ' : 'payslip upload: ') + q.filename : q.op === 'payment' ? 'payment'
         : q.op === 'paymentDelete' ? 'payment removal' : q.op === 'leave' ? 'leave' : q.op === 'leaveDelete' ? 'leave removal' : q.action,
       time: q.ts ? new Date(q.ts).toISOString() : '', london: q.ts ? dayKey(q.ts) + ' ' + hm(q.ts) : '', fields: q.fields || undefined,
       location: q.loc || '', note: q.note || '', manual: !!q.manual, id: q.id,
@@ -1488,6 +1650,17 @@
       if (p) openPayForm(p);
     });
     $('mwCheck').addEventListener('click', onRateCheck);
+    $('docFile').addEventListener('change', onDocChosen);
+    $('leaveAllowance').addEventListener('click', e => {
+      if (!e.target.closest('[data-opencontract]')) return;
+      e.preventDefault();
+      const c = contractDoc(); if (c) openDoc(c.id);
+    });
+    $('docList').addEventListener('click', e => {
+      if (e.target.closest('a')) return;
+      const o = e.target.closest('[data-open]'); if (o) { openDoc(o.dataset.open); return; }
+      const sh = e.target.closest('[data-share]'); if (sh) shareDoc(sh.dataset.share);
+    });
     $('leaveNew').addEventListener('click', () => { $('leaveErr').textContent = ''; openLeaveForm({ id: uuid(), from: dayKey(Date.now()) }, { isNew: true }); });
     $('leaveCancel').addEventListener('click', closeLeaveForm);
     $('leaveSave').addEventListener('click', onLeaveSave);
@@ -1544,12 +1717,14 @@
       if (view === 'calendar') loadCalendar(false);
       if (view === 'pay') loadPayments(false);
       if (view === 'leave') loadLeave(false);
+      if (view === 'docs') loadDocs(false);
     });
     window.addEventListener('pageshow', () => renderAll());
     // Another copy of the app (e.g. a second tab) changed storage: reload our view of it.
     window.addEventListener('storage', () => {
       queue = store.get(KEYS.queue, []); failed = store.get(KEYS.failed, []);
       snap = store.get(KEYS.snap, null); lastTap = store.get(KEYS.lastTap, null); cal = store.get(KEYS.cal, null); pay = store.get(KEYS.pay, null); leave = store.get(KEYS.leave, null);
+      docs = store.get(KEYS.docs, null); docCache = store.get(KEYS.docCache, {});
       renderAll();
     });
 
