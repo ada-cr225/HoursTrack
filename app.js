@@ -10,7 +10,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const TZ = 'Europe/London';
   const KEYS = { cfg: 'hc.cfg', queue: 'hc.queue', failed: 'hc.failed', snap: 'hc.snapshot', prefs: 'hc.prefs', lastTap: 'hc.lastTap', cal: 'hc.calendar' };
   const UNDO_MS = 2 * 60 * 1000;        // the server allows 3 minutes; keep a margin
@@ -500,7 +500,86 @@
   function showToast() { renderToast(Date.now()); }
   function hideToast() { $('toast').classList.add('hidden'); }
 
+  let contractDirty = false;
+
+  function renderContract() {
+    const st = snap && snap.settings;
+    if (st && !contractDirty) {
+      $('cStart').value = st.start || '';
+      $('cEnd').value = st.end || '';
+      $('cSalary').value = st.salary != null ? st.salary : '';
+    }
+    const box = $('mw');
+    if (!st) { box.innerHTML = '<p class="empty">Open with signal to load your contract settings.</p>'; return; }
+    const today = dayKey(Date.now());
+    const fmtDay = k => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(new Date(k + 'T12:00:00Z'));
+    const upcoming = (st.rates || []).filter(r => r.from > today);
+    const rs = st.rateStatus;
+    let status;
+    if (!rs) {
+      status = '<span style="color:var(--warn)">Not linked to GOV.UK yet. In your sheet, run <b>Hours Clock › Set up minimum wage updates</b> once.</span>';
+    } else if (rs.ok) {
+      status = 'Confirmed with GOV.UK ' + new Intl.DateTimeFormat('en-GB', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(rs.checkedAt)) + '.';
+    } else {
+      status = '<span style="color:var(--out)">' + esc(rs.message) + '</span>';
+    }
+    box.innerHTML = '<div class="mwbox">' +
+      '<div class="big-rate">' + (st.minimumWage != null ? '£' + st.minimumWage.toFixed(2) + '<span class="sub"> /hour, 21 and over</span>' : '—') + '</div>' +
+      (upcoming.length ? '<div class="sub" style="margin-top:4px">' + upcoming.map(r => 'Rises to £' + r.rate.toFixed(2) + ' from ' + esc(fmtDay(r.from))).join('<br>') + '</div>' : '') +
+      '<p class="note" style="margin-top:8px">' + status + ' Each month is checked against the rate in force that month. ' +
+      '<a href="' + esc(st.rateSource) + '" target="_blank" rel="noopener">Source: GOV.UK</a></p></div>';
+  }
+
+  async function onContractSave() {
+    const msg = $('cMsg');
+    msg.className = 'err'; msg.textContent = '';
+    const start = $('cStart').value, end = $('cEnd').value, salary = Number($('cSalary').value);
+    if (!start || !end) { msg.textContent = 'Choose a start and end date.'; return; }
+    if (end < start) { msg.textContent = 'The end date must be after the start date.'; return; }
+    if (!isFinite(salary) || salary < 1000 || salary > 500000) { msg.textContent = 'Enter an annual salary between £1,000 and £500,000.'; return; }
+    const st = snap && snap.settings;
+    if (st && st.start && st.start !== start) {
+      const ok = confirm('Changing the start date moves every row on your Log tab.\n\nYour hours will be rebuilt from your recorded taps. Anything typed directly into the Log tab\'s yellow cells will be cleared. Taps are never deleted.\n\nContinue?');
+      if (!ok) return;
+    }
+    if (queue.length) {
+      msg.textContent = 'Sync your waiting taps first (they need signal), then save.';
+      sync();
+      return;
+    }
+    const btn = $('cSave');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res = await api({ api: 'updateSettings', start, end, salary: String(salary) });
+      if (!res.ok) { msg.textContent = res.code === 'auth' ? 'Your access key was rejected.' : res.error; return; }
+      applySnapshot(res);
+      contractDirty = false;
+      msg.className = 'okmsg'; msg.textContent = res.message || 'Saved.';
+      renderAll();
+      loadCalendar(true);
+    } catch (e) {
+      msg.textContent = e.kind === 'network' ? 'You need signal to change settings. Nothing was changed.' : e.message;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save to sheet';
+    }
+  }
+
+  async function onRateCheck() {
+    const btn = $('mwCheck');
+    btn.disabled = true; btn.textContent = 'Checking GOV.UK…';
+    try {
+      const res = await api({ api: 'refreshRate' });
+      if (res.ok) { applySnapshot(res); renderAll(); }
+      else alert(res.error);
+    } catch (e) {
+      alert(e.kind === 'network' ? 'You need signal to check GOV.UK.' : e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Check GOV.UK now';
+    }
+  }
+
   function renderSettings() {
+    renderContract();
     $('target').value = prefs.target;
     if (cfg) $('fallback').href = cfg.url + '?k=' + encodeURIComponent(cfg.key);
     $('about').textContent = 'Version ' + VERSION + '. Taps are saved on this phone first and sent to your sheet when there is signal.';
@@ -805,6 +884,9 @@
     $('syncNow').addEventListener('click', () => sync());
     $('backup').addEventListener('click', onBackup);
     $('reconnect').addEventListener('click', openSetup);
+    ['cStart', 'cEnd', 'cSalary'].forEach(id => $(id).addEventListener('input', () => { contractDirty = true; }));
+    $('cSave').addEventListener('click', onContractSave);
+    $('mwCheck').addEventListener('click', onRateCheck);
     $('setupConnect').addEventListener('click', onConnect);
     $('setupForce').addEventListener('click', onForceSave);
     $('setupCancel').addEventListener('click', () => { setupOpen = false; renderAll(); });

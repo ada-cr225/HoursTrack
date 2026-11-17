@@ -50,7 +50,8 @@
     .pill.wait { color: var(--warn); background: var(--warn-soft); }
     .pill.bad { color: var(--out); background: var(--out-soft); }
 
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; min-width: 0; overflow-wrap: anywhere; }
+    html, body { overflow-x: hidden; }
     .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 700; }
 
     .status { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
@@ -104,7 +105,8 @@
     ul.list .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .empty { color: var(--muted); font-size: 14px; }
 
-    table.hist { width: 100%; border-collapse: collapse; font-size: 14px; }
+    table.hist { width: 100%; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
+    table.hist td:first-child { width: 38%; } table.hist td.r { width: 22%; }
     table.hist td { padding: 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
     table.hist tr:last-child td { border-bottom: 0; }
     table.hist td.r { text-align: right; }
@@ -116,7 +118,9 @@
     }
     label { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; }
     .row { display: flex; gap: 8px; }
-    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+    .grid2 > * { min-width: 0; }
+    input[type="date"], input[type="time"] { min-width: 0; max-width: 100%; display: block; }
     .full { grid-column: 1 / -1; }
     .btn {
       font: inherit; font-weight: 700; border: 0; border-radius: 12px; padding: 12px 16px;
@@ -130,6 +134,12 @@
     details summary::after { content: "›"; color: var(--muted); transform: rotate(90deg); transition: transform .15s; }
     details[open] summary::after { transform: rotate(270deg); }
     .note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+    .sechead { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+    .grid2 > .sechead:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+    .okmsg { color: var(--in); }
+    .mwbox { background: var(--soft); border-radius: 12px; padding: 12px; }
+    .mwbox .big-rate { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .mwbox a { color: var(--accent); }
     .err { color: var(--out); font-size: 14px; margin-top: 10px; }
 
     .tabs {
@@ -293,6 +303,20 @@
       <details>
         <summary>Settings</summary>
         <div class="grid2" style="margin-top:12px">
+          <div class="full sechead">Contract · saved to your sheet</div>
+          <div><label for="cStart">Start date</label><input type="date" id="cStart"></div>
+          <div><label for="cEnd">End date</label><input type="date" id="cEnd"></div>
+          <div class="full"><label for="cSalary">Annual gross salary (£)</label><input id="cSalary" type="number" inputmode="decimal" min="1000" max="500000" step="1"></div>
+          <div class="full">
+            <button class="btn" id="cSave" type="button" style="width:100%">Save to sheet</button>
+            <div class="err" id="cMsg" role="status"></div>
+          </div>
+
+          <div class="full sechead">Minimum wage · set by GOV.UK</div>
+          <div class="full" id="mw"></div>
+          <div class="full"><button class="btn ghost" id="mwCheck" type="button" style="width:100%">Check GOV.UK now</button></div>
+
+          <div class="full sechead">This phone</div>
           <div><label for="target">Daily target (hours)</label><input id="target" type="number" min="1" max="16" step="0.5" inputmode="decimal"></div>
           <div style="display:flex;align-items:flex-end"><button class="btn ghost" id="syncNow" type="button" style="width:100%">Sync now</button></div>
           <div class="full"><button class="btn ghost" id="backup" type="button" style="width:100%">Copy taps waiting to sync</button></div>
